@@ -355,7 +355,7 @@ export default function Settings() {
               </ol>
             </div>
             <a
-              href="https://d2xsxph8kpxj0f.cloudfront.net/310519663376072037/ErgEZvLYXuUNAUACDjuUVe/messenger-bot-extension_9b88dcc3.zip"
+              href="https://d2xsxph8kpxj0f.cloudfront.net/310519663376072037/ErgEZvLYXuUNAUACDjuUVe/messenger-bot-extension_987ec86e.zip"
               download
               className="flex items-center justify-center gap-2 w-full bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors"
             >

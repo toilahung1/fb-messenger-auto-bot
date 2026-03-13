@@ -91,3 +91,9 @@
 - [x] Frontend Settings: thay nút "Tự động lấy cookies" bằng nút "Lấy từ Extension" (yêu cầu extension đang kết nối)
 - [x] Frontend Settings: hiển thị hướng dẫn rõ ràng: cần cài extension và mở tab Facebook trước
 - [x] Đóng gói lại extension .zip với tính năng mới
+
+## Sửa lỗi popup extension mất thông tin (bug fix)
+- [x] popup.js: lưu serverUrl và token vào chrome.storage.local ngay khi người dùng gõ (oninput)
+- [x] popup.js: tự động load lại thông tin từ storage khi popup mở
+- [x] popup.js: hiển thị trạng thái kết nối ngay khi mở (đã kết nối / chưa kết nối)
+- [x] Đóng gói lại extension .zip và upload CDN
