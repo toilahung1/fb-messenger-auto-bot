@@ -21,15 +21,93 @@ import {
 } from "@/components/ui/sidebar";
 import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, Users } from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, Users, MessageSquare, History, Settings, Bot, Bell } from "lucide-react";
+import { trpc } from "@/lib/trpc";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { format } from "date-fns";
+
+function NotificationBell() {
+  const { data: count } = trpc.notifications.unreadCount.useQuery(undefined, { refetchInterval: 30000 });
+  const { data: notifications } = trpc.notifications.list.useQuery();
+  const utils = trpc.useUtils();
+  const markRead = trpc.notifications.markRead.useMutation({
+    onSuccess: () => {
+      utils.notifications.list.invalidate();
+      utils.notifications.unreadCount.invalidate();
+    },
+  });
+  const markAllRead = trpc.notifications.markAllRead.useMutation({
+    onSuccess: () => {
+      utils.notifications.list.invalidate();
+      utils.notifications.unreadCount.invalidate();
+    },
+  });
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button className="relative h-9 w-9 flex items-center justify-center rounded-lg hover:bg-accent transition-colors">
+          <Bell className="h-4 w-4" />
+          {(count ?? 0) > 0 && (
+            <span className="absolute -top-0.5 -right-0.5 h-4 w-4 bg-primary text-primary-foreground text-[10px] font-bold rounded-full flex items-center justify-center">
+              {count! > 9 ? '9+' : count}
+            </span>
+          )}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-80 p-0">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border/50">
+          <p className="font-semibold text-sm">Thông báo</p>
+          {(count ?? 0) > 0 && (
+            <button onClick={() => markAllRead.mutate()} className="text-xs text-primary hover:underline">
+              Định dấu tất cả đã đọc
+            </button>
+          )}
+        </div>
+        <div className="max-h-80 overflow-y-auto">
+          {!notifications || notifications.length === 0 ? (
+            <div className="py-8 text-center text-sm text-muted-foreground">Không có thông báo</div>
+          ) : (
+            notifications.slice(0, 20).map((n) => (
+              <div
+                key={n.id}
+                className={`px-4 py-3 border-b border-border/30 cursor-pointer hover:bg-muted/30 transition-colors ${!n.isRead ? 'bg-muted/20' : ''}`}
+                onClick={() => !n.isRead && markRead.mutate({ id: n.id })}
+              >
+                <div className="flex items-start gap-2">
+                  <div className={`h-2 w-2 rounded-full mt-1.5 shrink-0 ${
+                    n.type === 'success' ? 'bg-green-400' :
+                    n.type === 'error' ? 'bg-red-400' :
+                    n.type === 'warning' ? 'bg-yellow-400' : 'bg-blue-400'
+                  } ${n.isRead ? 'opacity-30' : ''}`} />
+                  <div className="min-w-0">
+                    <p className={`text-xs font-medium ${n.isRead ? 'text-muted-foreground' : ''}`}>{n.title}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{n.content}</p>
+                    <p className="text-[10px] text-muted-foreground/60 mt-1">{format(new Date(n.createdAt), 'HH:mm dd/MM')}</p>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { Button } from "./ui/button";
 
 const menuItems = [
-  { icon: LayoutDashboard, label: "Page 1", path: "/" },
-  { icon: Users, label: "Page 2", path: "/some-path" },
+  { icon: LayoutDashboard, label: "Dashboard", path: "/" },
+  { icon: MessageSquare, label: "Chiến dịch", path: "/campaigns" },
+  { icon: History, label: "Lịch sử", path: "/logs" },
+  { icon: Settings, label: "Cài đặt", path: "/settings" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
@@ -170,8 +248,9 @@ function DashboardLayoutContent({
               </button>
               {!isCollapsed ? (
                 <div className="flex items-center gap-2 min-w-0">
+                  <Bot className="h-5 w-5 text-primary shrink-0" />
                   <span className="font-semibold tracking-tight truncate">
-                    Navigation
+                    Messenger Bot
                   </span>
                 </div>
               ) : null}
@@ -243,21 +322,14 @@ function DashboardLayoutContent({
       </div>
 
       <SidebarInset>
-        {isMobile && (
-          <div className="flex border-b h-14 items-center justify-between bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:backdrop-blur sticky top-0 z-40">
-            <div className="flex items-center gap-2">
-              <SidebarTrigger className="h-9 w-9 rounded-lg bg-background" />
-              <div className="flex items-center gap-3">
-                <div className="flex flex-col gap-1">
-                  <span className="tracking-tight text-foreground">
-                    {activeMenuItem?.label ?? "Menu"}
-                  </span>
-                </div>
-              </div>
-            </div>
+        <div className="flex border-b h-14 items-center justify-between bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:backdrop-blur sticky top-0 z-40">
+          <div className="flex items-center gap-2">
+            {isMobile && <SidebarTrigger className="h-9 w-9 rounded-lg bg-background" />}
+            <span className="font-medium text-sm">{activeMenuItem?.label ?? ""}</span>
           </div>
-        )}
-        <main className="flex-1 p-4">{children}</main>
+          <NotificationBell />
+        </div>
+        <main className="flex-1 p-6">{children}</main>
       </SidebarInset>
     </>
   );
