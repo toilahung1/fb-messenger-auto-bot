@@ -27,6 +27,7 @@ import {
   getDashboardStats,
 } from "./db";
 import { startCampaign, stopCampaign, isCampaignRunning } from "./campaign.runner";
+import { extractFacebookCookies } from "./puppeteer.service";
 import { storagePut } from "./storage";
 import { parse as csvParse } from "csv-parse/sync";
 import { getExtensionStatus, sendCommandToExtension } from "./ws.service";
@@ -314,6 +315,33 @@ const botSessionRouter = router({
       const sent = sendCommandToExtension(session.extensionToken, input.action);
       if (!sent) throw new TRPCError({ code: "BAD_REQUEST", message: "Extension chưa kết nối" });
       return { success: true };
+    }),
+
+  // Tự động lấy cookies từ URL Facebook
+  extractCookies: protectedProcedure
+    .input(z.object({ url: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const result = await extractFacebookCookies(ctx.user.id, input.url);
+      if (!result.success) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: result.error || "Không thể lấy cookies",
+        });
+      }
+      // Tự động lưu cookies vào database nếu thành công
+      if (result.cookies) {
+        await upsertBotSession({
+          userId: ctx.user.id,
+          sessionData: result.cookies,
+          isActive: true,
+          lastVerified: new Date(),
+        });
+      }
+      return {
+        success: true,
+        cookieCount: result.cookieCount,
+        message: `Đã lấy thành công ${result.cookieCount} cookies và lưu vào hệ thống`,
+      };
     }),
 
   // Bắt đầu chiến dịch qua extension

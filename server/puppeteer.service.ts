@@ -240,3 +240,211 @@ export async function sendMessengerMessage(
     }
   }
 }
+
+// ─── Tự động lấy cookies từ URL Facebook ──────────────────────────────────────
+// Người dùng nhập URL Facebook (profile, messenger, v.v.)
+// Hệ thống mở headless browser, điều hướng đến URL đó,
+// chờ trang load và trích xuất toàn bộ cookies phiên đăng nhập.
+// Yêu cầu: người dùng đã đăng nhập Facebook trên trình duyệt đó trước đó
+// (hoặc cung cấp cookies thủ công lần đầu để bootstrap).
+//
+// Cách hoạt động thực tế:
+// - Nếu server chạy trên máy người dùng: mở browser với profile thật → lấy cookies
+// - Nếu server chạy trên cloud: mở headless browser → người dùng cần login thủ công lần đầu
+//   sau đó cookies được lưu và tái sử dụng
+
+export interface ExtractCookiesResult {
+  success: boolean;
+  cookies?: string; // JSON string của mảng cookies
+  cookieCount?: number;
+  error?: string;
+  requiresLogin?: boolean; // true nếu Facebook yêu cầu đăng nhập
+  loginUrl?: string;       // URL để người dùng đăng nhập
+}
+
+// Biến lưu trữ browser đang chờ login (dùng cho flow login thủ công)
+const pendingLoginBrowsers = new Map<number, { browser: Browser; page: Page; createdAt: number }>();
+
+// Dọn dẹp các browser pending quá 10 phút
+setInterval(() => {
+  const now = Date.now();
+  Array.from(pendingLoginBrowsers.entries()).forEach(([userId, entry]) => {
+    if (now - entry.createdAt > 10 * 60 * 1000) {
+      try { entry.browser.close(); } catch {}
+      pendingLoginBrowsers.delete(userId);
+    }
+  });
+}, 60 * 1000);
+
+export async function extractFacebookCookies(
+  userId: number,
+  targetUrl: string
+): Promise<ExtractCookiesResult> {
+  let browser: Browser | null = null;
+  try {
+    // Chuẩn hóa URL
+    let url = targetUrl.trim();
+    if (!url.startsWith("http")) {
+      url = "https://" + url;
+    }
+    // Nếu không phải facebook/messenger domain, mặc định về messenger
+    if (!url.includes("facebook.com") && !url.includes("messenger.com")) {
+      url = "https://www.messenger.com";
+    }
+
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-blink-features=AutomationControlled",
+        "--window-size=1280,800",
+      ],
+    });
+
+    const page = await browser.newPage();
+
+    // Giả lập trình duyệt thật để tránh bị chặn
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    );
+    await page.setViewport({ width: 1280, height: 800 });
+
+    // Ẩn dấu hiệu automation
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    });
+
+    // Điều hướng đến URL mục tiêu
+    console.log(`[Puppeteer] Navigating to: ${url}`);
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+
+    // Chờ thêm để trang load đầy đủ
+    await new Promise((r) => setTimeout(r, 3000));
+
+    const currentUrl = page.url();
+    console.log(`[Puppeteer] Current URL after navigation: ${currentUrl}`);
+
+    // Kiểm tra xem có bị redirect về trang login không
+    const isLoginPage =
+      currentUrl.includes("/login") ||
+      currentUrl.includes("login.php") ||
+      currentUrl.includes("checkpoint") ||
+      currentUrl.includes("accounts/login");
+
+    if (isLoginPage) {
+      // Lưu browser để người dùng có thể login thủ công (nếu cần)
+      pendingLoginBrowsers.set(userId, { browser, page, createdAt: Date.now() });
+      browser = null; // Không đóng browser này
+
+      return {
+        success: false,
+        requiresLogin: true,
+        loginUrl: currentUrl,
+        error:
+          "Facebook yêu cầu đăng nhập. Bạn cần cung cấp cookies phiên đăng nhập hợp lệ trước. " +
+          "Hãy đăng nhập Facebook trên trình duyệt của bạn, xuất cookies bằng extension Cookie-Editor, " +
+          "rồi dán vào ô bên dưới.",
+      };
+    }
+
+    // Lấy tất cả cookies từ domain facebook.com và messenger.com
+    const allCookies = await page.cookies(
+      "https://www.facebook.com",
+      "https://www.messenger.com",
+      "https://facebook.com",
+      "https://messenger.com"
+    );
+
+    // Lọc các cookies quan trọng cho phiên đăng nhập
+    const sessionCookieNames = [
+      "c_user", "xs", "fr", "datr", "sb", "wd", "locale",
+      "presence", "dpr", "m_pixel_ratio", "usida", "x-referer",
+      "act", "spin", "noscript", "flow", "oo", "pl",
+    ];
+
+    // Ưu tiên cookies quan trọng, nhưng giữ tất cả để đảm bảo session hoạt động
+    const importantCookies = allCookies.filter((c) =>
+      sessionCookieNames.includes(c.name) || c.domain?.includes("facebook.com") || c.domain?.includes("messenger.com")
+    );
+
+    if (importantCookies.length === 0) {
+      return {
+        success: false,
+        error: "Không tìm thấy cookies phiên đăng nhập. Trang có thể chưa load đầy đủ hoặc bạn chưa đăng nhập.",
+      };
+    }
+
+    // Kiểm tra có cookie c_user (xác nhận đã đăng nhập) không
+    const hasUserCookie = importantCookies.some((c) => c.name === "c_user");
+    if (!hasUserCookie) {
+      return {
+        success: false,
+        requiresLogin: true,
+        error:
+          "Không tìm thấy cookie xác thực người dùng (c_user). " +
+          "Vui lòng đăng nhập Facebook trên trình duyệt, xuất cookies và dán thủ công.",
+      };
+    }
+
+    const cookiesJson = JSON.stringify(importantCookies, null, 2);
+    console.log(`[Puppeteer] Extracted ${importantCookies.length} cookies successfully`);
+
+    return {
+      success: true,
+      cookies: cookiesJson,
+      cookieCount: importantCookies.length,
+    };
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error("[Puppeteer] extractFacebookCookies error:", msg);
+    return { success: false, error: `Lỗi khi lấy cookies: ${msg}` };
+  } finally {
+    if (browser) {
+      try { await browser.close(); } catch {}
+    }
+  }
+}
+
+// Lấy cookies từ browser đang chờ login (sau khi người dùng đã login thủ công)
+export async function getCookiesFromPendingBrowser(userId: number): Promise<ExtractCookiesResult> {
+  const entry = pendingLoginBrowsers.get(userId);
+  if (!entry) {
+    return { success: false, error: "Không có phiên browser nào đang chờ" };
+  }
+
+  try {
+    const { browser, page } = entry;
+    const currentUrl = page.url();
+
+    // Kiểm tra đã login chưa
+    if (currentUrl.includes("/login") || currentUrl.includes("checkpoint")) {
+      return {
+        success: false,
+        requiresLogin: true,
+        error: "Chưa đăng nhập. Vui lòng hoàn tất đăng nhập trên trình duyệt.",
+      };
+    }
+
+    const allCookies = await page.cookies(
+      "https://www.facebook.com",
+      "https://www.messenger.com"
+    );
+
+    const hasUserCookie = allCookies.some((c) => c.name === "c_user");
+    if (!hasUserCookie) {
+      return { success: false, requiresLogin: true, error: "Chưa đăng nhập thành công" };
+    }
+
+    const cookiesJson = JSON.stringify(allCookies, null, 2);
+    pendingLoginBrowsers.delete(userId);
+    try { await browser.close(); } catch {}
+
+    return { success: true, cookies: cookiesJson, cookieCount: allCookies.length };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { success: false, error: msg };
+  }
+}

@@ -4,6 +4,7 @@ import DashboardLayout from "@/components/DashboardLayout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   AlertDialog,
@@ -26,6 +27,10 @@ import {
   ExternalLink,
   Download,
   Puzzle,
+  Wand2,
+  Cookie,
+  Loader2,
+  AlertTriangle,
 } from "lucide-react";
 import { format } from "date-fns";
 
@@ -39,10 +44,22 @@ export default function Settings() {
     onSuccess: () => {
       utils.botSession.get.invalidate();
       setSessionInput("");
-      toast.success("Session Facebook đã được lưu và xác minh thành công");
+      toast.success("Session Facebook đã được lưu thành công");
     },
     onError: (e) => toast.error(e.message),
   });
+
+  const extractCookiesMutation = trpc.botSession.extractCookies.useMutation({
+    onSuccess: (data) => {
+      utils.botSession.get.invalidate();
+      setFacebookUrl("");
+      toast.success(data.message || `Đã lấy thành công ${data.cookieCount} cookies!`);
+    },
+    onError: (e) => {
+      toast.error(e.message, { duration: 6000 });
+    },
+  });
+
   const deleteMutation = trpc.botSession.delete.useMutation({
     onSuccess: () => {
       utils.botSession.get.invalidate();
@@ -64,6 +81,8 @@ export default function Settings() {
 
   const [sessionInput, setSessionInput] = useState("");
   const [showDeleteSession, setShowDeleteSession] = useState(false);
+  const [facebookUrl, setFacebookUrl] = useState("");
+  const [activeTab, setActiveTab] = useState<"auto" | "manual">("auto");
 
   return (
     <DashboardLayout>
@@ -116,54 +135,151 @@ export default function Settings() {
               </div>
             )}
 
-            {/* How to get cookies */}
-            <div className="bg-muted/20 rounded-lg p-4 space-y-2">
-              <div className="flex items-center gap-2">
-                <Info className="h-4 w-4 text-primary shrink-0" />
-                <p className="text-sm font-medium">Cách lấy cookies Facebook</p>
-              </div>
-              <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
-                <li>Mở trình duyệt và đăng nhập vào <strong>facebook.com</strong></li>
-                <li>Cài extension <strong>EditThisCookie</strong> hoặc <strong>Cookie-Editor</strong></li>
-                <li>Truy cập <strong>messenger.com</strong>, mở extension và chọn "Export"</li>
-                <li>Sao chép toàn bộ JSON cookies và dán vào ô bên dưới</li>
-              </ol>
-              <a
-                href="https://chrome.google.com/webstore/detail/editthiscookie/fngmhnnpilhplaeedifhccceomclgfbg"
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+            {/* Tab switcher */}
+            <div className="flex rounded-lg border border-border/50 overflow-hidden">
+              <button
+                onClick={() => setActiveTab("auto")}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-medium transition-colors ${
+                  activeTab === "auto"
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted/20"
+                }`}
               >
-                <ExternalLink className="h-3 w-3" /> Tải EditThisCookie
-              </a>
+                <Wand2 className="h-4 w-4" />
+                Tự động lấy cookies
+              </button>
+              <button
+                onClick={() => setActiveTab("manual")}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-medium transition-colors ${
+                  activeTab === "manual"
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted/20"
+                }`}
+              >
+                <Cookie className="h-4 w-4" />
+                Dán cookies thủ công
+              </button>
             </div>
 
-            {/* Input */}
-            <div className="space-y-1.5">
-              <Label>Dán JSON cookies tại đây</Label>
-              <Textarea
-                placeholder='[{"name":"c_user","value":"...","domain":".facebook.com",...}]'
-                rows={6}
-                value={sessionInput}
-                onChange={(e) => setSessionInput(e.target.value)}
-                className="font-mono text-xs"
-              />
-            </div>
+            {/* Auto extract tab */}
+            {activeTab === "auto" && (
+              <div className="space-y-4">
+                <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Info className="h-4 w-4 text-blue-400 shrink-0" />
+                    <p className="text-sm font-medium text-blue-400">Cách hoạt động</p>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Nhập link Facebook của bạn (trang cá nhân, messenger.com, v.v.). Hệ thống sẽ tự động mở trình duyệt ẩn, điều hướng đến trang đó và trích xuất cookies phiên đăng nhập.
+                  </p>
+                  <div className="flex items-start gap-2 mt-2">
+                    <AlertTriangle className="h-4 w-4 text-yellow-400 shrink-0 mt-0.5" />
+                    <p className="text-xs text-yellow-400/80">
+                      <strong>Lưu ý:</strong> Tính năng này chỉ hoạt động nếu server đang chạy trên máy tính của bạn và bạn đã đăng nhập Facebook trên trình duyệt đó. Nếu server chạy trên cloud, hãy dùng tab "Dán cookies thủ công".
+                    </p>
+                  </div>
+                </div>
 
-            <Button
-              onClick={() => {
-                if (!sessionInput.trim()) { toast.error("Vui lòng dán cookies"); return; }
-                try { JSON.parse(sessionInput); } catch {
-                  toast.error("JSON không hợp lệ"); return;
-                }
-                saveMutation.mutate({ sessionData: sessionInput });
-              }}
-              disabled={saveMutation.isPending || !sessionInput.trim()}
-              className="w-full"
-            >
-              <Save className="h-4 w-4 mr-2" />
-              {saveMutation.isPending ? "Đang xác minh session..." : "Lưu & Xác minh Session"}
-            </Button>
+                <div className="space-y-1.5">
+                  <Label htmlFor="fb-url">Link Facebook của bạn</Label>
+                  <Input
+                    id="fb-url"
+                    placeholder="https://www.facebook.com/your.profile hoặc https://messenger.com"
+                    value={facebookUrl}
+                    onChange={(e) => setFacebookUrl(e.target.value)}
+                    className="font-mono text-sm"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Ví dụ: https://www.facebook.com, https://messenger.com, hoặc link profile của bạn
+                  </p>
+                </div>
+
+                <Button
+                  onClick={() => {
+                    if (!facebookUrl.trim()) {
+                      toast.error("Vui lòng nhập link Facebook");
+                      return;
+                    }
+                    extractCookiesMutation.mutate({ url: facebookUrl.trim() });
+                  }}
+                  disabled={extractCookiesMutation.isPending || !facebookUrl.trim()}
+                  className="w-full"
+                >
+                  {extractCookiesMutation.isPending ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Đang mở trình duyệt và lấy cookies... (có thể mất 15-30 giây)
+                    </>
+                  ) : (
+                    <>
+                      <Wand2 className="h-4 w-4 mr-2" />
+                      Tự động lấy cookies
+                    </>
+                  )}
+                </Button>
+
+                {extractCookiesMutation.isPending && (
+                  <div className="bg-muted/20 rounded-lg p-3">
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      <span>Đang mở trình duyệt headless và điều hướng đến Facebook...</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Manual tab */}
+            {activeTab === "manual" && (
+              <div className="space-y-4">
+                <div className="bg-muted/20 rounded-lg p-4 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Info className="h-4 w-4 text-primary shrink-0" />
+                    <p className="text-sm font-medium">Cách lấy cookies thủ công</p>
+                  </div>
+                  <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
+                    <li>Mở trình duyệt và đăng nhập vào <strong>facebook.com</strong></li>
+                    <li>Cài extension <strong>EditThisCookie</strong> hoặc <strong>Cookie-Editor</strong></li>
+                    <li>Truy cập <strong>messenger.com</strong>, mở extension và chọn "Export"</li>
+                    <li>Sao chép toàn bộ JSON cookies và dán vào ô bên dưới</li>
+                  </ol>
+                  <a
+                    href="https://chrome.google.com/webstore/detail/editthiscookie/fngmhnnpilhplaeedifhccceomclgfbg"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                  >
+                    <ExternalLink className="h-3 w-3" /> Tải EditThisCookie
+                  </a>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label>Dán JSON cookies tại đây</Label>
+                  <Textarea
+                    placeholder='[{"name":"c_user","value":"...","domain":".facebook.com",...}]'
+                    rows={6}
+                    value={sessionInput}
+                    onChange={(e) => setSessionInput(e.target.value)}
+                    className="font-mono text-xs"
+                  />
+                </div>
+
+                <Button
+                  onClick={() => {
+                    if (!sessionInput.trim()) { toast.error("Vui lòng dán cookies"); return; }
+                    try { JSON.parse(sessionInput); } catch {
+                      toast.error("JSON không hợp lệ"); return;
+                    }
+                    saveMutation.mutate({ sessionData: sessionInput });
+                  }}
+                  disabled={saveMutation.isPending || !sessionInput.trim()}
+                  className="w-full"
+                >
+                  <Save className="h-4 w-4 mr-2" />
+                  {saveMutation.isPending ? "Đang lưu session..." : "Lưu Session"}
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
 

@@ -63,3 +63,10 @@
 - [x] Nút Start/Stop bot, chọn chiến dịch để chạy
 - [x] Hiển thị tiến độ real-time khi bot đang gửi
 - [x] Hướng dẫn cài extension ngay trên trang
+
+## Tự động lấy cookies Facebook (mới)
+- [x] Backend: Puppeteer mở URL Facebook, chờ trang load, trích xuất cookies
+- [x] Backend: tRPC procedure `botSession.extractCookies` nhận URL, trả về cookies
+- [x] Frontend: Form nhập URL Facebook trong trang Cài đặt
+- [x] Frontend: Nút "Ự động lấy cookies" với loading state và preview kết quả
+- [x] Frontend: Hiển thị trạng thái tiến trình (đang mở trang, đang lấy cookies, hoàn thành)
