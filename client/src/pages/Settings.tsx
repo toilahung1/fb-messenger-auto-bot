@@ -84,6 +84,20 @@ export default function Settings() {
   const [facebookUrl, setFacebookUrl] = useState("");
   const [activeTab, setActiveTab] = useState<"auto" | "manual">("auto");
 
+  const requestCookiesMutation = trpc.botSession.requestCookiesFromExtension.useMutation({
+    onSuccess: (data) => {
+      utils.botSession.get.invalidate();
+      toast.success(data.message || `Đã lấy thành công ${data.cookieCount} cookies từ extension!`);
+    },
+    onError: (e) => {
+      toast.error(e.message, { duration: 6000 });
+    },
+  });
+
+  const { data: extStatus } = trpc.botSession.extensionStatus.useQuery(undefined, {
+    refetchInterval: 3000,
+  });
+
   return (
     <DashboardLayout>
       <div className="space-y-6 max-w-2xl">
@@ -164,68 +178,102 @@ export default function Settings() {
             {/* Auto extract tab */}
             {activeTab === "auto" && (
               <div className="space-y-4">
-                <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4 space-y-2">
+
+                {/* Phương thức 1: Lấy cookies qua Extension (khuyến nghị) */}
+                <div className="space-y-3">
                   <div className="flex items-center gap-2">
-                    <Info className="h-4 w-4 text-blue-400 shrink-0" />
-                    <p className="text-sm font-medium text-blue-400">Cách hoạt động</p>
+                    <div className="h-5 w-5 rounded-full bg-primary flex items-center justify-center text-xs font-bold text-primary-foreground">1</div>
+                    <p className="text-sm font-semibold">Lấy cookies qua Extension <span className="text-xs text-green-400 font-normal">(Khuyến nghị)</span></p>
                   </div>
-                  <p className="text-xs text-muted-foreground">
-                    Nhập link Facebook của bạn (trang cá nhân, messenger.com, v.v.). Hệ thống sẽ tự động mở trình duyệt ẩn, điều hướng đến trang đó và trích xuất cookies phiên đăng nhập.
-                  </p>
-                  <div className="flex items-start gap-2 mt-2">
+
+                  {/* Trạng thái extension */}
+                  <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs ${
+                    extStatus?.connected
+                      ? "bg-green-500/10 border border-green-500/20 text-green-400"
+                      : "bg-yellow-500/10 border border-yellow-500/20 text-yellow-400"
+                  }`}>
+                    <div className={`h-2 w-2 rounded-full ${
+                      extStatus?.connected ? "bg-green-400 animate-pulse" : "bg-yellow-400"
+                    }`} />
+                    {extStatus?.connected
+                      ? "Extension đang kết nối — sẵn sàng lấy cookies"
+                      : "Extension chưa kết nối — xem hướng dẫn bên dưới"}
+                  </div>
+
+                  <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 space-y-1">
+                    <p className="text-xs text-blue-300 font-medium">Cách thực hiện:</p>
+                    <ol className="text-xs text-muted-foreground space-y-0.5 list-decimal list-inside">
+                      <li>Cài Chrome Extension (xem hướng dẫn bên dưới)</li>
+                      <li>Mở tab <strong>facebook.com</strong> hoặc <strong>messenger.com</strong> và đăng nhập</li>
+                      <li>Nhấn nút "Ự động lấy cookies qua Extension" bên dưới</li>
+                    </ol>
+                  </div>
+
+                  <Button
+                    onClick={() => requestCookiesMutation.mutate()}
+                    disabled={requestCookiesMutation.isPending || !extStatus?.connected}
+                    className="w-full"
+                  >
+                    {requestCookiesMutation.isPending ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Đang lấy cookies từ extension...
+                      </>
+                    ) : (
+                      <>
+                        <Wand2 className="h-4 w-4 mr-2" />
+                        {extStatus?.connected ? "Ự động lấy cookies qua Extension" : "Cần kết nối Extension trước"}
+                      </>
+                    )}
+                  </Button>
+                </div>
+
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-border/30" /></div>
+                  <div className="relative flex justify-center text-xs"><span className="bg-card px-2 text-muted-foreground">hoặc</span></div>
+                </div>
+
+                {/* Phương thức 2: Puppeteer headless (fallback) */}
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <div className="h-5 w-5 rounded-full bg-muted flex items-center justify-center text-xs font-bold text-muted-foreground">2</div>
+                    <p className="text-sm font-semibold text-muted-foreground">Lấy bằng trình duyệt ẩn <span className="text-xs font-normal">(chỉ khi server chạy local)</span></p>
+                  </div>
+
+                  <div className="flex items-start gap-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3">
                     <AlertTriangle className="h-4 w-4 text-yellow-400 shrink-0 mt-0.5" />
                     <p className="text-xs text-yellow-400/80">
-                      <strong>Lưu ý:</strong> Tính năng này chỉ hoạt động nếu server đang chạy trên máy tính của bạn và bạn đã đăng nhập Facebook trên trình duyệt đó. Nếu server chạy trên cloud, hãy dùng tab "Dán cookies thủ công".
+                      Phương thức này mở trình duyệt ẩn riêng biệt — <strong>không chia sẻ cookies với Chrome của bạn</strong>. Chỉ dùng khi server chạy trên máy tính của bạn và đã có profile Chrome đăng nhập sẵn.
                     </p>
                   </div>
-                </div>
 
-                <div className="space-y-1.5">
-                  <Label htmlFor="fb-url">Link Facebook của bạn</Label>
-                  <Input
-                    id="fb-url"
-                    placeholder="https://www.facebook.com/your.profile hoặc https://messenger.com"
-                    value={facebookUrl}
-                    onChange={(e) => setFacebookUrl(e.target.value)}
-                    className="font-mono text-sm"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Ví dụ: https://www.facebook.com, https://messenger.com, hoặc link profile của bạn
-                  </p>
-                </div>
-
-                <Button
-                  onClick={() => {
-                    if (!facebookUrl.trim()) {
-                      toast.error("Vui lòng nhập link Facebook");
-                      return;
-                    }
-                    extractCookiesMutation.mutate({ url: facebookUrl.trim() });
-                  }}
-                  disabled={extractCookiesMutation.isPending || !facebookUrl.trim()}
-                  className="w-full"
-                >
-                  {extractCookiesMutation.isPending ? (
-                    <>
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Đang mở trình duyệt và lấy cookies... (có thể mất 15-30 giây)
-                    </>
-                  ) : (
-                    <>
-                      <Wand2 className="h-4 w-4 mr-2" />
-                      Tự động lấy cookies
-                    </>
-                  )}
-                </Button>
-
-                {extractCookiesMutation.isPending && (
-                  <div className="bg-muted/20 rounded-lg p-3">
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                      <span>Đang mở trình duyệt headless và điều hướng đến Facebook...</span>
-                    </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="fb-url">Link Facebook</Label>
+                    <Input
+                      id="fb-url"
+                      placeholder="https://www.facebook.com hoặc https://messenger.com"
+                      value={facebookUrl}
+                      onChange={(e) => setFacebookUrl(e.target.value)}
+                      className="font-mono text-sm"
+                    />
                   </div>
-                )}
+
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      if (!facebookUrl.trim()) { toast.error("Vui lòng nhập link Facebook"); return; }
+                      extractCookiesMutation.mutate({ url: facebookUrl.trim() });
+                    }}
+                    disabled={extractCookiesMutation.isPending || !facebookUrl.trim()}
+                    className="w-full"
+                  >
+                    {extractCookiesMutation.isPending ? (
+                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Đang mở trình duyệt... (15-30 giây)</>
+                    ) : (
+                      <><Wand2 className="h-4 w-4 mr-2" />Lấy bằng trình duyệt ẩn</>
+                    )}
+                  </Button>
+                </div>
               </div>
             )}
 
@@ -307,7 +355,7 @@ export default function Settings() {
               </ol>
             </div>
             <a
-              href="https://d2xsxph8kpxj0f.cloudfront.net/310519663376072037/ErgEZvLYXuUNAUACDjuUVe/messenger-bot-extension_dbd0d887.zip"
+              href="https://d2xsxph8kpxj0f.cloudfront.net/310519663376072037/ErgEZvLYXuUNAUACDjuUVe/messenger-bot-extension_9b88dcc3.zip"
               download
               className="flex items-center justify-center gap-2 w-full bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors"
             >

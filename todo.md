@@ -82,3 +82,12 @@
 - [x] Cấu hình bảo vệ trong UI: chọn mức độ an toàn (Thấp/Trung bình/Cao/Cực cao)
 - [x] Hiển thị Risk Score và cảnh báo trước khi chạy campaign
 - [x] Lịch sử checkpoint: ghi lại khi nào bị checkpoint, bao nhiêu tin đã gửi
+
+## Sửa lỗi lấy cookies Facebook (bug fix)
+- [x] Extension: thêm lệnh `get_cookies` - lấy cookies từ tab facebook.com/messenger.com đang mở
+- [x] Extension: gửi cookies về server qua WebSocket socket event `cookies_result`
+- [x] Backend: lắng nghe event `cookies_result` từ extension, lưu vào database
+- [x] Backend: thêm tRPC procedure `botSession.requestCookiesFromExtension` 
+- [x] Frontend Settings: thay nút "Tự động lấy cookies" bằng nút "Lấy từ Extension" (yêu cầu extension đang kết nối)
+- [x] Frontend Settings: hiển thị hướng dẫn rõ ràng: cần cài extension và mở tab Facebook trước
+- [x] Đóng gói lại extension .zip với tính năng mới

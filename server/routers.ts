@@ -379,6 +379,44 @@ const botSessionRouter = router({
       };
     }),
 
+  // Lấy cookies từ extension (không cần nhập URL, dùng cookies từ tab Facebook đang mở)
+  requestCookiesFromExtension: protectedProcedure
+    .mutation(async ({ ctx }) => {
+      const session = await getBotSession(ctx.user.id);
+      if (!session?.extensionToken) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Chưa có extension token. Vui lòng cài và kết nối extension trước.",
+        });
+      }
+
+      const { requestCookiesFromExtension: reqCookies } = await import("./ws.service");
+      const result = await reqCookies(session.extensionToken);
+
+      if (!result.success) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: result.error || "Không thể lấy cookies từ extension",
+        });
+      }
+
+      // Tự động lưu cookies vào database
+      if (result.cookies && result.cookies.length > 0) {
+        await upsertBotSession({
+          userId: ctx.user.id,
+          sessionData: JSON.stringify(result.cookies),
+          isActive: true,
+          lastVerified: new Date(),
+        });
+      }
+
+      return {
+        success: true,
+        cookieCount: result.cookieCount || result.cookies?.length || 0,
+        message: `Đã lấy thành công ${result.cookieCount || result.cookies?.length || 0} cookies từ extension và lưu vào hệ thống`,
+      };
+    }),
+
   // Bắt đầu chiến dịch qua extension
   startBotCampaign: protectedProcedure
     .input(z.object({ campaignId: z.number() }))

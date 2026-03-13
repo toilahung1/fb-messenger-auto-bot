@@ -18,6 +18,9 @@ const extensionSockets = new Map<string, Socket>();
 const viewerSockets = new Map<string, Set<Socket>>();
 // Map: extensionToken → campaign running state
 const runningCampaigns = new Map<string, { campaignId: number; current: number; total: number }>();
+// Map: extensionToken → pending cookies request resolve
+type CookiesResult = { success: boolean; cookies?: unknown[]; error?: string; cookieCount?: number };
+const pendingCookiesRequests = new Map<string, (result: CookiesResult) => void>();
 
 let io: SocketIOServer | null = null;
 
@@ -125,6 +128,18 @@ export function initWebSocketServer(httpServer: HttpServer) {
 
     socket.on("pong", () => {
       // Extension alive
+    });
+
+    // Nhận kết quả cookies từ extension
+    socket.on("cookies_result", (data: CookiesResult) => {
+      if (!authenticatedToken) return;
+      const resolve = pendingCookiesRequests.get(authenticatedToken);
+      if (resolve) {
+        pendingCookiesRequests.delete(authenticatedToken);
+        resolve(data);
+      }
+      // Cũng broadcast tới viewers để cập nhật UI
+      broadcastToViewers(authenticatedToken, "cookies_result", data);
     });
 
     socket.on("disconnect", () => {
@@ -275,4 +290,29 @@ export function sendCommandToExtension(token: string, command: string, payload?:
   if (!socket) return false;
   socket.emit(command, payload);
   return true;
+}
+
+// Yêu cầu extension lấy cookies, chờ kết quả (timeout 15s)
+export function requestCookiesFromExtension(token: string): Promise<CookiesResult> {
+  return new Promise((resolve, reject) => {
+    const socket = extensionSockets.get(token);
+    if (!socket) {
+      resolve({ success: false, error: 'Extension chưa kết nối. Vui lòng mở extension và kết nối trước.' });
+      return;
+    }
+
+    // Đăng ký callback
+    pendingCookiesRequests.set(token, resolve);
+
+    // Gửi lệnh get_cookies tới extension
+    socket.emit('get_cookies');
+
+    // Timeout sau 15 giây
+    setTimeout(() => {
+      if (pendingCookiesRequests.has(token)) {
+        pendingCookiesRequests.delete(token);
+        resolve({ success: false, error: 'Hết thời gian chờ. Extension không phản hồi.' });
+      }
+    }, 15000);
+  });
 }
