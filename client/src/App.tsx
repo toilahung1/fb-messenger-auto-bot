@@ -11,6 +11,7 @@ import CampaignDetail from "./pages/CampaignDetail";
 import Recipients from "./pages/Recipients";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
+import BotControl from "./pages/BotControl";
 
 function Router() {
   return (
@@ -21,6 +22,7 @@ function Router() {
       <Route path="/campaigns/:id/recipients" component={Recipients} />
       <Route path="/logs" component={Logs} />
       <Route path="/settings" component={Settings} />
+      <Route path="/bot-control" component={BotControl} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

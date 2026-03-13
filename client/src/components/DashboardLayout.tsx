@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/sidebar";
 import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, Users, MessageSquare, History, Settings, Bot, Bell } from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, Users, MessageSquare, History, Settings, Bot, Bell, Monitor } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import {
   Popover,
@@ -106,6 +106,7 @@ import { Button } from "./ui/button";
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/" },
   { icon: MessageSquare, label: "Chiến dịch", path: "/campaigns" },
+  { icon: Monitor, label: "Bot Control", path: "/bot-control" },
   { icon: History, label: "Lịch sử", path: "/logs" },
   { icon: Settings, label: "Cài đặt", path: "/settings" },
 ];

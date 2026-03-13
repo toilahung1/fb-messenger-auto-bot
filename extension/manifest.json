@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "Messenger Auto Bot",
+  "version": "1.0.0",
+  "description": "Tự động gửi tin nhắn Facebook Messenger và stream màn hình về website quản lý",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "tabCapture",
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://www.messenger.com/*",
+    "https://messenger.com/*",
+    "https://www.facebook.com/*",
+    "https://facebook.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.messenger.com/*",
+        "https://messenger.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["capture.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

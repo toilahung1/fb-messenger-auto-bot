@@ -42,3 +42,24 @@
 - [x] Test API recipients
 - [x] Test bot control logic
 - [x] Test import CSV
+
+## Chrome Extension (mới)
+- [x] manifest.json v3 với quyền tabs, scripting, tabCapture, storage
+- [x] background.js: kết nối WebSocket tới server, nhận lệnh từ website
+- [x] content.js: inject vào tab Messenger, tự động gửi tin nhắn qua DOM
+- [x] popup.html: hiển thị trạng thái kết nối, nút connect/disconnect
+- [x] Tab capture: stream màn hình tab Messenger về server qua WebSocket
+- [x] Đóng gói extension thành file .zip để cài đặt
+
+## Backend WebSocket (mới)
+- [x] Socket.IO server nhận stream frame từ extension
+- [x] Relay stream frame tới website client
+- [x] Nhận lệnh từ website, forward tới extension
+- [x] Quản lý trạng thái kết nối extension (online/offline)
+
+## Frontend Bot Control (mới)
+- [x] Trang Bot Control với live screen stream (canvas/img)
+- [x] Hiển thị trạng thái extension (connected/disconnected)
+- [x] Nút Start/Stop bot, chọn chiến dịch để chạy
+- [x] Hiển thị tiến độ real-time khi bot đang gửi
+- [x] Hướng dẫn cài extension ngay trên trang

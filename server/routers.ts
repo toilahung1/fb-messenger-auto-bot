@@ -27,9 +27,13 @@ import {
   getDashboardStats,
 } from "./db";
 import { startCampaign, stopCampaign, isCampaignRunning } from "./campaign.runner";
-import { verifyFacebookSession } from "./puppeteer.service";
 import { storagePut } from "./storage";
 import { parse as csvParse } from "csv-parse/sync";
+import { getExtensionStatus, sendCommandToExtension } from "./ws.service";
+import { nanoid } from "nanoid";
+import { getDb } from "./db";
+import { botSessions } from "../drizzle/schema";
+import { eq } from "drizzle-orm";
 
 // ─── Campaign Router ──────────────────────────────────────────────────────────
 const campaignRouter = router({
@@ -121,7 +125,7 @@ const campaignRouter = router({
 const recipientRouter = router({
   list: protectedProcedure
     .input(z.object({ campaignId: z.number() }))
-    .query(({ ctx, input }) => getRecipientsByCampaign(input.campaignId)),
+    .query(({ input }) => getRecipientsByCampaign(input.campaignId)),
 
   add: protectedProcedure
     .input(
@@ -136,7 +140,6 @@ const recipientRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       const recipient = await addRecipient({ ...input, userId: ctx.user.id, status: "pending" });
-      // Cập nhật tổng số người nhận
       const all = await getRecipientsByCampaign(input.campaignId);
       await updateCampaign(input.campaignId, ctx.user.id, { totalRecipients: all.length });
       return recipient;
@@ -146,16 +149,14 @@ const recipientRouter = router({
     .input(
       z.object({
         campaignId: z.number(),
-        csvContent: z.string(), // Base64 encoded CSV
+        csvContent: z.string(),
         fileName: z.string(),
       })
     )
     .mutation(async ({ ctx, input }) => {
-      // Decode base64
       const csvBuffer = Buffer.from(input.csvContent, "base64");
       const csvText = csvBuffer.toString("utf-8");
 
-      // Parse CSV
       let records: Record<string, string>[];
       try {
         records = csvParse(csvText, {
@@ -171,7 +172,6 @@ const recipientRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "File CSV không có dữ liệu" });
       }
 
-      // Map CSV columns (linh hoạt với nhiều tên cột)
       const toInsert = records.map((row) => {
         const name =
           row["name"] || row["Name"] || row["tên"] || row["Tên"] ||
@@ -182,7 +182,6 @@ const recipientRouter = router({
           row["facebook_uid"] || row["FacebookUid"] || row["uid"] || row["UID"] || "";
         const phone = row["phone"] || row["Phone"] || row["sdt"] || row["SDT"] || "";
 
-        // Lấy các cột còn lại làm extraData
         const extraData: Record<string, string> = {};
         for (const [k, v] of Object.entries(row)) {
           if (!["name", "Name", "tên", "Tên", "full_name", "fullname",
@@ -207,7 +206,6 @@ const recipientRouter = router({
 
       await bulkAddRecipients(toInsert);
 
-      // Upload CSV lên S3
       try {
         const fileKey = `csv-imports/${ctx.user.id}/${input.campaignId}-${Date.now()}-${input.fileName}`;
         const { url: csvFileUrl } = await storagePut(fileKey, csvBuffer, "text/csv");
@@ -237,32 +235,28 @@ const recipientRouter = router({
 const logsRouter = router({
   byCampaign: protectedProcedure
     .input(z.object({ campaignId: z.number(), limit: z.number().optional() }))
-    .query(({ ctx, input }) => getMessageLogsByCampaign(input.campaignId, input.limit)),
+    .query(({ input }) => getMessageLogsByCampaign(input.campaignId, input.limit)),
 
   byUser: protectedProcedure
     .input(z.object({ limit: z.number().optional() }))
     .query(({ ctx, input }) => getMessageLogsByUser(ctx.user.id, input.limit)),
 });
 
-// ─── Bot Session Router ───────────────────────────────────────────────────────
+// ─── Bot Session & Extension Router ──────────────────────────────────────────
 const botSessionRouter = router({
   get: protectedProcedure.query(async ({ ctx }) => {
     const session = await getBotSession(ctx.user.id);
     if (!session) return null;
-    return { isActive: session.isActive, lastVerified: session.lastVerified };
+    return {
+      isActive: session.isActive,
+      lastVerified: session.lastVerified,
+      extensionToken: session.extensionToken,
+    };
   }),
 
   save: protectedProcedure
     .input(z.object({ sessionData: z.string().min(1) }))
     .mutation(async ({ ctx, input }) => {
-      // Xác minh session
-      const isValid = await verifyFacebookSession(input.sessionData);
-      if (!isValid) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "Session Facebook không hợp lệ hoặc đã hết hạn",
-        });
-      }
       await upsertBotSession({
         userId: ctx.user.id,
         sessionData: input.sessionData,
@@ -276,6 +270,95 @@ const botSessionRouter = router({
     await deleteBotSession(ctx.user.id);
     return { success: true };
   }),
+
+  // Tạo hoặc lấy extension token để kết nối với Chrome Extension
+  getExtensionToken: protectedProcedure.mutation(async ({ ctx }) => {
+    const db = await getDb();
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+
+    let session = await getBotSession(ctx.user.id);
+    if (!session) {
+      await upsertBotSession({ userId: ctx.user.id, isActive: false });
+      session = await getBotSession(ctx.user.id);
+    }
+
+    if (!session?.extensionToken) {
+      const token = nanoid(32);
+      await db.update(botSessions)
+        .set({ extensionToken: token })
+        .where(eq(botSessions.userId, ctx.user.id));
+      return { token };
+    }
+    return { token: session.extensionToken };
+  }),
+
+  // Lấy trạng thái kết nối của extension
+  extensionStatus: protectedProcedure.query(async ({ ctx }) => {
+    const session = await getBotSession(ctx.user.id);
+    if (!session?.extensionToken) {
+      return { connected: false, streaming: false, botRunning: false, campaign: null };
+    }
+    return getExtensionStatus(session.extensionToken);
+  }),
+
+  // Gửi lệnh tới extension
+  sendCommand: protectedProcedure
+    .input(z.object({
+      action: z.enum(["start_stream", "stop_stream", "stop_bot"]),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const session = await getBotSession(ctx.user.id);
+      if (!session?.extensionToken) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Chưa có extension token" });
+      }
+      const sent = sendCommandToExtension(session.extensionToken, input.action);
+      if (!sent) throw new TRPCError({ code: "BAD_REQUEST", message: "Extension chưa kết nối" });
+      return { success: true };
+    }),
+
+  // Bắt đầu chiến dịch qua extension
+  startBotCampaign: protectedProcedure
+    .input(z.object({ campaignId: z.number() }))
+    .mutation(async ({ ctx, input }) => {
+      const session = await getBotSession(ctx.user.id);
+      if (!session?.extensionToken) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Chưa kết nối extension" });
+      }
+
+      const campaign = await getCampaignById(input.campaignId, ctx.user.id);
+      if (!campaign) throw new TRPCError({ code: "NOT_FOUND", message: "Không tìm thấy chiến dịch" });
+
+      const allRecipients = await getRecipientsByCampaign(input.campaignId);
+      const pendingRecipients = allRecipients.filter(
+        (r) => r.status === "pending" || r.status === "failed"
+      );
+
+      if (pendingRecipients.length === 0) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Không có người nhận nào cần gửi" });
+      }
+
+      const sent = sendCommandToExtension(session.extensionToken, "start_bot", {
+        campaignId: campaign.id,
+        recipients: pendingRecipients.map((r) => ({
+          id: r.id,
+          name: r.name,
+          facebookUrl: r.facebookUrl,
+          facebookUid: r.facebookUid,
+        })),
+        messageTemplate: campaign.messageTemplate,
+        delay: campaign.delayBetweenMessages,
+        maxRetries: campaign.maxRetries,
+        total: pendingRecipients.length,
+      });
+
+      if (!sent) throw new TRPCError({ code: "BAD_REQUEST", message: "Extension chưa kết nối" });
+
+      await updateCampaign(input.campaignId, ctx.user.id, {
+        status: "running",
+        startedAt: new Date(),
+      });
+      return { success: true, total: pendingRecipients.length };
+    }),
 });
 
 // ─── Notifications Router ─────────────────────────────────────────────────────

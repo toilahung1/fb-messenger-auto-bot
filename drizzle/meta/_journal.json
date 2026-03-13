@@ -15,6 +15,13 @@
       "when": 1773402166362,
       "tag": "0001_flawless_matthew_murdock",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1773403656838,
+      "tag": "0002_slippery_quasar",
+      "breakpoints": true
     }
   ]
 }

@@ -99,6 +99,7 @@ export const botSessions = mysqlTable("bot_sessions", {
   id: int("id").autoincrement().primaryKey(),
   userId: int("userId").notNull().unique(),
   sessionData: text("sessionData"), // JSON cookies
+  extensionToken: varchar("extensionToken", { length: 128 }), // Token để extension xác thực
   isActive: boolean("isActive").default(false).notNull(),
   lastVerified: timestamp("lastVerified"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),

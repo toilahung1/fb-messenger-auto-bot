@@ -24,6 +24,8 @@ import {
   Save,
   Info,
   ExternalLink,
+  Download,
+  Puzzle,
 } from "lucide-react";
 import { format } from "date-fns";
 
@@ -162,6 +164,40 @@ export default function Settings() {
               <Save className="h-4 w-4 mr-2" />
               {saveMutation.isPending ? "Đang xác minh session..." : "Lưu & Xác minh Session"}
             </Button>
+          </CardContent>
+        </Card>
+
+        {/* Extension Download */}
+        <Card className="border-border/50">
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Puzzle className="h-5 w-5 text-indigo-400" />
+              <CardTitle className="text-base">Chrome Extension</CardTitle>
+            </div>
+            <CardDescription>
+              Cài extension vào Chrome để kết nối với website, stream màn hình Messenger và chạy bot tự động.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="bg-muted/20 rounded-lg p-4 space-y-2">
+              <p className="text-sm font-medium">Hướng dẫn cài đặt</p>
+              <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
+                <li>Tải file extension (.zip) bên dưới</li>
+                <li>Giải nén file .zip ra thư mục</li>
+                <li>Mở Chrome → <strong>chrome://extensions</strong></li>
+                <li>Bật <strong>Developer mode</strong> (góc trên phải)</li>
+                <li>Nhấn <strong>Load unpacked</strong> và chọn thư mục vừa giải nén</li>
+                <li>Nhấp vào icon extension → nhập URL website và token từ trang <strong>Bot Control</strong></li>
+              </ol>
+            </div>
+            <a
+              href="https://d2xsxph8kpxj0f.cloudfront.net/310519663376072037/ErgEZvLYXuUNAUACDjuUVe/messenger-bot-extension_dbd0d887.zip"
+              download
+              className="flex items-center justify-center gap-2 w-full bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors"
+            >
+              <Download className="h-4 w-4" />
+              Tải Extension (.zip)
+            </a>
           </CardContent>
         </Card>
 
