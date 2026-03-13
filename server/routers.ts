@@ -34,7 +34,7 @@ import {
 import { computeNextRunAt } from "./scheduler.service";
 import { startCampaign, stopCampaign, isCampaignRunning, assessCampaignRisk, SAFETY_PRESETS, getRiskInfo } from "./campaign.runner";
 import { SAFETY_PRESETS as _SP, type SafetyLevel } from "./anti-checkpoint.service";
-import { extractFacebookCookies } from "./puppeteer.service";
+import { extractFacebookCookies, startScreenStream, stopScreenStream, isStreaming } from "./puppeteer.service";
 import { storagePut } from "./storage";
 import { parse as csvParse } from "csv-parse/sync";
 import { broadcastToUser } from "./ws.service";
@@ -57,6 +57,8 @@ const campaignRouter = router({
         name: z.string().min(1),
         description: z.string().optional(),
         messageTemplate: z.string().min(1),
+        mode: z.enum(["inbox_scan", "manual"]).default("inbox_scan"),
+        maxSendCount: z.number().min(0).default(0), // 0 = không giới hạn
         delayBetweenMessages: z.number().min(1000).max(60000).default(3000),
         maxRetries: z.number().min(1).max(5).default(3),
       })
@@ -72,6 +74,8 @@ const campaignRouter = router({
         name: z.string().min(1).optional(),
         description: z.string().optional(),
         messageTemplate: z.string().min(1).optional(),
+        mode: z.enum(["inbox_scan", "manual"]).optional(),
+        maxSendCount: z.number().min(0).optional(),
         delayBetweenMessages: z.number().min(1000).max(60000).optional(),
         maxRetries: z.number().min(1).max(5).optional(),
       })
@@ -329,15 +333,43 @@ const botSessionRouter = router({
           lastVerified: new Date(),
         });
       }
-      return {
+        return {
         success: true,
         cookieCount: result.cookieCount,
         message: `Đã lấy thành công ${result.cookieCount} cookies và lưu vào hệ thống`,
       };
     }),
 
-});
+  // Bắt đầu stream màn hình Messenger
+  startStream: protectedProcedure.mutation(async ({ ctx }) => {
+    const session = await getBotSession(ctx.user.id);
+    if (!session?.sessionData || !session.isActive) {
+      throw new TRPCError({ code: "BAD_REQUEST", message: "Chưa có phiên đăng nhập Facebook. Vui lòng cấu hình session trước." });
+    }
+    const result = await startScreenStream(
+      ctx.user.id,
+      session.sessionData,
+      (base64: string) => {
+        broadcastToUser(ctx.user.id, "screen_frame", { data: base64, width: 1280, height: 800 });
+      }
+    );
+    if (!result.ok) {
+      throw new TRPCError({ code: "BAD_REQUEST", message: result.error || "Không thể bắt đầu stream" });
+    }
+    return { success: true, streaming: true };
+  }),
 
+  // Dừng stream
+  stopStream: protectedProcedure.mutation(async () => {
+    stopScreenStream();
+    return { success: true, streaming: false };
+  }),
+
+  // Trạng thái stream
+  streamStatus: protectedProcedure.query(async () => {
+    return { streaming: isStreaming() };
+  }),
+});
 // Placeholder - extensionStatus query removed (no more extension)
 
 // ─── Notifications Router ─────────────────────────────────────────────────────

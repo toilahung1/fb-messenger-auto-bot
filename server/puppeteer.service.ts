@@ -1,26 +1,35 @@
 import puppeteer, { Browser, Page } from "puppeteer";
 
-interface SendMessageOptions {
-  recipientName: string;
-  facebookUrl?: string;
-  message: string;
-  sessionData?: string; // JSON cookies
-  antiCheckpointConfig?: import('./anti-checkpoint.service').AntiCheckpointConfig;
-  messageIndex?: number;
+// ─── Types ────────────────────────────────────────────────────────────────────
+export interface InboxContact {
+  name: string;
+  conversationUrl: string;
 }
 
-interface SendResult {
+export interface SendResult {
   success: boolean;
   error?: string;
   checkpointDetected?: boolean;
 }
 
-// Singleton browser instance per process
+export interface ExtractCookiesResult {
+  success: boolean;
+  cookies?: string;
+  cookieCount?: number;
+  error?: string;
+  requiresLogin?: boolean;
+  loginUrl?: string;
+}
+
+// ─── Singleton Browser ────────────────────────────────────────────────────────
 let browserInstance: Browser | null = null;
 let browserUserId: number | null = null;
+// Page dùng cho stream màn hình (giữ mở suốt phiên)
+let streamPage: Page | null = null;
+// Interval chụp screenshot
+let streamInterval: NodeJS.Timeout | null = null;
 
 async function getBrowser(userId: number, sessionData?: string): Promise<Browser> {
-  // Nếu đã có browser cho user này, tái sử dụng
   if (browserInstance && browserUserId === userId) {
     try {
       const pages = await browserInstance.pages();
@@ -29,13 +38,11 @@ async function getBrowser(userId: number, sessionData?: string): Promise<Browser
       browserInstance = null;
     }
   }
-
-  // Đóng browser cũ nếu có
   if (browserInstance) {
     try { await browserInstance.close(); } catch {}
     browserInstance = null;
+    streamPage = null;
   }
-
   const browser = await puppeteer.launch({
     headless: true,
     args: [
@@ -47,42 +54,412 @@ async function getBrowser(userId: number, sessionData?: string): Promise<Browser
       "--no-zygote",
       "--disable-gpu",
       "--window-size=1280,800",
+      "--disable-blink-features=AutomationControlled",
     ],
   });
-
   browserInstance = browser;
   browserUserId = userId;
-
-  // Khôi phục session cookies nếu có
   if (sessionData) {
     try {
       const cookies = JSON.parse(sessionData);
       const pages = await browser.pages();
       const page = pages[0] || (await browser.newPage());
-      await page.goto("https://www.messenger.com", { waitUntil: "domcontentloaded", timeout: 15000 });
       await page.setCookie(...cookies);
     } catch (e) {
       console.warn("[Puppeteer] Failed to restore session:", e);
     }
   }
-
   return browser;
 }
 
 export async function closeBrowser() {
+  stopScreenStream();
   if (browserInstance) {
     try { await browserInstance.close(); } catch {}
     browserInstance = null;
     browserUserId = null;
+    streamPage = null;
   }
 }
 
-// Thay thế biến động trong nội dung tin nhắn
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 export function interpolateMessage(template: string, data: Record<string, string>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (_, key) => data[key] ?? `{{${key}}}`);
 }
 
-// Kiểm tra session Facebook có còn hợp lệ không
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
+async function applyCookiesToPage(page: Page, sessionData: string) {
+  try {
+    const cookies = JSON.parse(sessionData);
+    await page.setCookie(...cookies);
+  } catch {}
+}
+
+async function setPageDefaults(page: Page) {
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+  );
+  await page.setViewport({ width: 1280, height: 800 });
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+  });
+}
+
+// ─── Screen Stream ────────────────────────────────────────────────────────────
+export async function startScreenStream(
+  userId: number,
+  sessionData: string,
+  onFrame: (base64: string) => void
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const browser = await getBrowser(userId, sessionData);
+    if (!streamPage || streamPage.isClosed()) {
+      streamPage = await browser.newPage();
+      await setPageDefaults(streamPage);
+      await applyCookiesToPage(streamPage, sessionData);
+      console.log("[Puppeteer] Opening Messenger inbox...");
+      await streamPage.goto("https://www.messenger.com/", {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
+      });
+      await sleep(3000);
+      const url = streamPage.url();
+      console.log("[Puppeteer] Stream page URL:", url);
+      if (url.includes("login") || url.includes("checkpoint") || url.includes("recover")) {
+        return {
+          ok: false,
+          error: "Cookies đã hết hạn hoặc không hợp lệ. Hãy cập nhật cookies trong Cài đặt.",
+        };
+      }
+    }
+    if (streamInterval) clearInterval(streamInterval);
+    streamInterval = setInterval(async () => {
+      if (!streamPage || streamPage.isClosed()) {
+        stopScreenStream();
+        return;
+      }
+      try {
+        const screenshot = await streamPage.screenshot({ type: "jpeg", quality: 60 });
+        onFrame(Buffer.from(screenshot).toString("base64"));
+      } catch {
+        // ignore frame errors
+      }
+    }, 250); // 4fps
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: `Lỗi khi mở Messenger: ${msg}` };
+  }
+}
+
+export function stopScreenStream() {
+  if (streamInterval) {
+    clearInterval(streamInterval);
+    streamInterval = null;
+  }
+}
+
+export function isStreaming() { return streamInterval !== null; }
+
+// ─── Scan Inbox: lấy danh sách hội thoại từ Messenger inbox ──────────────────
+// Bot tự động scroll inbox từ trên xuống và lấy danh sách conversation
+export async function scanMessengerInbox(
+  userId: number,
+  sessionData: string,
+  maxContacts: number = 0 // 0 = không giới hạn
+): Promise<{ contacts: InboxContact[]; error?: string }> {
+  // Ưu tiên dùng streamPage để người dùng xem được quá trình
+  const useStreamPage = streamPage && !streamPage.isClosed();
+  let ownedPage: Page | null = null;
+  let activePage: Page;
+
+  try {
+    const browser = await getBrowser(userId, sessionData);
+    if (useStreamPage) {
+      activePage = streamPage!;
+      // Đảm bảo đang ở trang inbox
+      const currentUrl = activePage.url();
+      if (!currentUrl.includes("messenger.com")) {
+        await activePage.goto("https://www.messenger.com/", {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        });
+        await sleep(3000);
+      }
+    } else {
+      ownedPage = await browser.newPage();
+      await setPageDefaults(ownedPage);
+      await applyCookiesToPage(ownedPage, sessionData);
+      await ownedPage.goto("https://www.messenger.com/", {
+        waitUntil: "networkidle2",
+        timeout: 30000,
+      });
+      await sleep(3000);
+      activePage = ownedPage;
+    }
+
+    const url = activePage.url();
+    if (url.includes("login") || url.includes("checkpoint")) {
+      return { contacts: [], error: "Cookies hết hạn. Hãy cập nhật cookies trong Cài đặt." };
+    }
+
+    const contacts: InboxContact[] = [];
+    let prevCount = 0;
+    let noNewCount = 0;
+    const maxScrollAttempts = 50; // tối đa 50 lần scroll
+    let scrollAttempts = 0;
+
+    console.log("[Puppeteer] Scanning inbox...");
+
+    while (scrollAttempts < maxScrollAttempts) {
+      scrollAttempts++;
+
+      // Lấy danh sách conversation links hiện tại
+      const found = await activePage.evaluate(() => {
+        const results: { name: string; url: string }[] = [];
+        // Tìm tất cả link hội thoại - Messenger dùng /t/ hoặc /e2ee/t/
+        const linkNodes = document.querySelectorAll('a[href*="/t/"], a[href*="/e2ee/t/"]');
+        const links = Array.from(linkNodes);
+        links.forEach((link) => {
+          const href = (link as HTMLAnchorElement).href;
+          if (!href.includes("messenger.com")) return;
+
+          // Lấy tên người dùng từ nhiều nguồn
+          let name = "";
+          // Thử aria-label trên link
+          name = link.getAttribute("aria-label") || "";
+          if (!name) {
+            // Thử span có dir="auto" (tên người dùng)
+            const spanNodes = link.querySelectorAll('span[dir="auto"]');
+            const spans = Array.from(spanNodes);
+            for (const span of spans) {
+              const text = span.textContent?.trim();
+              if (text && text.length > 0 && text.length < 100) {
+                name = text;
+                break;
+              }
+            }
+          }
+          if (!name) {
+            // Thử text content chung
+            const text = link.textContent?.trim();
+            if (text && text.length > 0 && text.length < 100) {
+              name = text.split("\n")[0].trim();
+            }
+          }
+
+          if (href && name) {
+            results.push({ name, url: href });
+          }
+        });
+
+        // Deduplicate by URL
+        const seen = new Set<string>();
+        return results.filter(r => {
+          if (seen.has(r.url)) return false;
+          seen.add(r.url);
+          return true;
+        });
+      });
+
+      // Thêm contacts mới chưa có trong danh sách
+      for (const item of found) {
+        if (!contacts.find(c => c.conversationUrl === item.url)) {
+          contacts.push({
+            name: item.name || "Người dùng",
+            conversationUrl: item.url,
+          });
+        }
+      }
+
+      console.log(`[Puppeteer] Inbox scan: ${contacts.length} contacts found (scroll ${scrollAttempts})`);
+
+      // Kiểm tra điều kiện dừng
+      if (maxContacts > 0 && contacts.length >= maxContacts) break;
+      if (contacts.length === prevCount) {
+        noNewCount++;
+        if (noNewCount >= 3) break; // Không có thêm sau 3 lần scroll
+      } else {
+        noNewCount = 0;
+      }
+      prevCount = contacts.length;
+
+      // Scroll xuống trong sidebar conversation list
+      await activePage.evaluate(() => {
+        // Tìm container chứa danh sách hội thoại
+        const selectors = [
+          '[aria-label="Chats"]',
+          '[aria-label="Conversations"]',
+          '[aria-label="Tin nhắn"]',
+          'div[role="navigation"]',
+          'div[style*="overflow"]',
+        ];
+        let scrolled = false;
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          if (el && el.scrollHeight > el.clientHeight) {
+            el.scrollTop += 600;
+            scrolled = true;
+            break;
+          }
+        }
+        if (!scrolled) {
+          // Fallback: scroll window
+          window.scrollBy(0, 600);
+        }
+      });
+      await sleep(1200);
+    }
+
+    const result = maxContacts > 0 ? contacts.slice(0, maxContacts) : contacts;
+    console.log(`[Puppeteer] Inbox scan complete: ${result.length} contacts`);
+    return { contacts: result };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[Puppeteer] scanMessengerInbox error:", msg);
+    return { contacts: [], error: msg };
+  } finally {
+    if (ownedPage) try { await ownedPage.close(); } catch {}
+  }
+}
+
+// ─── Open Conversation & Send Message ────────────────────────────────────────
+// Mở một hội thoại và gửi tin nhắn - dùng streamPage để hiển thị live
+export async function openConversationAndSend(
+  userId: number,
+  conversationUrl: string,
+  message: string,
+  sessionData: string,
+  antiCheckpointConfig?: import('./anti-checkpoint.service').AntiCheckpointConfig
+): Promise<SendResult> {
+  const useStreamPage = streamPage && !streamPage.isClosed();
+  let ownedPage: Page | null = null;
+  let activePage: Page;
+
+  try {
+    const browser = await getBrowser(userId, sessionData);
+    if (useStreamPage) {
+      activePage = streamPage!;
+    } else {
+      ownedPage = await browser.newPage();
+      await setPageDefaults(ownedPage);
+      await applyCookiesToPage(ownedPage, sessionData);
+      activePage = ownedPage;
+    }
+
+    const { detectCheckpoint, simulateMouseMovement, simulateHumanTyping } =
+      await import('./anti-checkpoint.service');
+
+    // Điều hướng đến conversation
+    console.log(`[Puppeteer] Opening: ${conversationUrl}`);
+    await activePage.goto(conversationUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+    await sleep(2000 + Math.random() * 1000);
+
+    // Kiểm tra checkpoint
+    const checkResult = await detectCheckpoint(activePage);
+    if (checkResult.detected) {
+      return { success: false, error: checkResult.message, checkpointDetected: true };
+    }
+
+    const currentUrl = activePage.url();
+    if (currentUrl.includes("login") || currentUrl.includes("checkpoint")) {
+      return { success: false, error: "Cookies hết hạn. Hãy cập nhật cookies trong Cài đặt." };
+    }
+
+    // Giả lập mouse movement
+    if (antiCheckpointConfig?.enableMouseMovement) {
+      await simulateMouseMovement(activePage);
+    }
+
+    // Tìm ô nhập tin nhắn
+    const msgSelectors = [
+      'div[contenteditable="true"][role="textbox"]',
+      'div[aria-label*="message"]',
+      'div[aria-label*="tin nhắn"]',
+      'div[data-lexical-editor="true"]',
+      '[contenteditable="true"]',
+    ];
+
+    let msgBox = null;
+    for (const sel of msgSelectors) {
+      try {
+        await activePage.waitForSelector(sel, { timeout: 8000 });
+        msgBox = await activePage.$(sel);
+        if (msgBox) break;
+      } catch {}
+    }
+
+    if (!msgBox) {
+      return {
+        success: false,
+        error: "Không tìm thấy ô nhập tin nhắn. Conversation có thể không hợp lệ.",
+      };
+    }
+
+    // Click vào ô nhập
+    await msgBox.click();
+    await sleep(300 + Math.random() * 200);
+
+    // Gõ tin nhắn
+    if (antiCheckpointConfig?.enableHumanTyping) {
+      await simulateHumanTyping(activePage, message);
+    } else {
+      for (const char of message) {
+        await activePage.keyboard.type(char);
+        await sleep(30 + Math.random() * 70);
+      }
+    }
+
+    await sleep(500 + Math.random() * 300);
+
+    // Gửi
+    await activePage.keyboard.press("Enter");
+    await sleep(1500 + Math.random() * 1000);
+
+    // Kiểm tra checkpoint sau khi gửi
+    const postCheck = await detectCheckpoint(activePage);
+    if (postCheck.detected) {
+      return { success: false, error: postCheck.message, checkpointDetected: true };
+    }
+
+    return { success: true };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { success: false, error: msg };
+  } finally {
+    if (ownedPage) try { await ownedPage.close(); } catch {}
+  }
+}
+
+// ─── Legacy sendMessengerMessage (backward compat) ────────────────────────────
+export async function sendMessengerMessage(
+  userId: number,
+  options: {
+    recipientName: string;
+    facebookUrl?: string;
+    message: string;
+    sessionData?: string;
+    antiCheckpointConfig?: import('./anti-checkpoint.service').AntiCheckpointConfig;
+    messageIndex?: number;
+  }
+): Promise<SendResult> {
+  if (!options.facebookUrl) {
+    return { success: false, error: "Không có URL hội thoại" };
+  }
+  return openConversationAndSend(
+    userId,
+    options.facebookUrl,
+    options.message,
+    options.sessionData ?? "[]",
+    options.antiCheckpointConfig
+  );
+}
+
+// ─── Verify Session ───────────────────────────────────────────────────────────
 export async function verifyFacebookSession(sessionData: string): Promise<boolean> {
   let browser: Browser | null = null;
   try {
@@ -91,12 +468,8 @@ export async function verifyFacebookSession(sessionData: string): Promise<boolea
       args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
     });
     const page = await browser.newPage();
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    );
-    const cookies = JSON.parse(sessionData);
     await page.goto("https://www.messenger.com", { waitUntil: "domcontentloaded", timeout: 20000 });
-    await page.setCookie(...cookies);
+    await page.setCookie(...JSON.parse(sessionData));
     await page.reload({ waitUntil: "networkidle2", timeout: 20000 });
     const url = page.url();
     return !url.includes("login") && !url.includes("checkpoint");
@@ -107,213 +480,9 @@ export async function verifyFacebookSession(sessionData: string): Promise<boolea
   }
 }
 
-// Gửi tin nhắn đến một người nhận
-export async function sendMessengerMessage(
-  userId: number,
-  options: SendMessageOptions
-): Promise<SendResult> {
-  let page: Page | null = null;
-  try {
-    const browser = await getBrowser(userId, options.sessionData);
-    page = await browser.newPage();
-
-    // Fingerprint protection
-    const { config: ac, getRandomUserAgent, getRandomViewport, applyFingerprintProtection } = await import('./anti-checkpoint.service').then(m => ({
-      config: options.antiCheckpointConfig,
-      getRandomUserAgent: m.getRandomUserAgent,
-      getRandomViewport: m.getRandomViewport,
-      applyFingerprintProtection: m.applyFingerprintProtection,
-    }));
-
-    if (ac?.enableFingerprintProtection) {
-      await applyFingerprintProtection(page);
-      await page.setUserAgent(getRandomUserAgent());
-      const vp = getRandomViewport();
-      await page.setViewport(vp);
-    } else {
-      await page.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      );
-      await page.setViewport({ width: 1280, height: 800 });
-    }
-
-    // Khôi phục cookies
-    if (options.sessionData) {
-      try {
-        const cookies = JSON.parse(options.sessionData);
-        await page.setCookie(...cookies);
-      } catch {}
-    }
-
-    // Điều hướng đến trang Messenger
-    let targetUrl = "https://www.messenger.com/";
-    if (options.facebookUrl) {
-      // Nếu có URL trực tiếp (ví dụ: https://www.messenger.com/t/username)
-      targetUrl = options.facebookUrl.startsWith("http")
-        ? options.facebookUrl
-        : `https://www.messenger.com/t/${options.facebookUrl}`;
-    }
-
-    await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 30000 });
-
-    // Kiểm tra checkpoint ngay sau khi load trang
-    const { detectCheckpoint, simulateMouseMovement, simulateRandomScrolling, simulateHumanTyping } = await import('./anti-checkpoint.service');
-    const checkpointResult = await detectCheckpoint(page);
-    if (checkpointResult.detected) {
-      return { success: false, error: checkpointResult.message, checkpointDetected: true };
-    }
-
-    const currentUrl = page.url();
-    if (currentUrl.includes("login")) {
-      return { success: false, error: "Phiên đăng nhập Facebook đã hết hạn. Vui lòng cập nhật session.", checkpointDetected: false };
-    }
-
-    // Giả lập hành vi người dùng
-    if (options.antiCheckpointConfig?.enableMouseMovement) {
-      await simulateMouseMovement(page);
-    }
-    if (options.antiCheckpointConfig?.enableRandomScrolling) {
-      await simulateRandomScrolling(page);
-    }
-
-    // Nếu không có URL cụ thể, tìm kiếm người nhận
-    if (!options.facebookUrl) {
-      // Tìm ô tìm kiếm
-      const searchSelectors = [
-        'input[placeholder*="Search"]',
-        'input[placeholder*="Tìm kiếm"]',
-        '[aria-label*="Search"]',
-        'input[type="search"]',
-      ];
-
-      let searchInput = null;
-      for (const sel of searchSelectors) {
-        try {
-          await page.waitForSelector(sel, { timeout: 5000 });
-          searchInput = await page.$(sel);
-          if (searchInput) break;
-        } catch {}
-      }
-
-      if (!searchInput) {
-        return { success: false, error: "Không tìm thấy ô tìm kiếm trên Messenger" };
-      }
-
-      await searchInput.click();
-      await page.keyboard.type(options.recipientName, { delay: 80 });
-      await new Promise((r) => setTimeout(r, 2000));
-
-      // Chọn kết quả đầu tiên
-      const resultSelectors = [
-        '[data-testid="search-result-item"]',
-        'a[role="link"][tabindex="0"]',
-        'li[role="option"]',
-        'div[role="option"]',
-      ];
-
-      let clicked = false;
-      for (const sel of resultSelectors) {
-        try {
-          const el = await page.$(sel);
-          if (el) {
-            await el.click();
-            clicked = true;
-            break;
-          }
-        } catch {}
-      }
-
-      if (!clicked) {
-        return { success: false, error: `Không tìm thấy người nhận: ${options.recipientName}` };
-      }
-
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-
-    // Tìm ô nhập tin nhắn
-    const msgSelectors = [
-      'div[contenteditable="true"][role="textbox"]',
-      'div[aria-label*="message"]',
-      'div[aria-label*="tin nhắn"]',
-      'div[data-lexical-editor="true"]',
-    ];
-
-    let msgBox = null;
-    for (const sel of msgSelectors) {
-      try {
-        await page.waitForSelector(sel, { timeout: 8000 });
-        msgBox = await page.$(sel);
-        if (msgBox) break;
-      } catch {}
-    }
-
-    if (!msgBox) {
-      return { success: false, error: "Không tìm thấy ô nhập tin nhắn" };
-    }
-
-    await msgBox.click();
-    await new Promise((r) => setTimeout(r, 300 + Math.random() * 400));
-
-    // Gõ tin nhắn: human typing hoặc nhanh
-    if (options.antiCheckpointConfig?.enableHumanTyping) {
-      await simulateHumanTyping(page, options.message);
-    } else {
-      await page.keyboard.type(options.message, { delay: 50 });
-    }
-    await new Promise((r) => setTimeout(r, 300 + Math.random() * 500));
-
-    // Kiểm tra checkpoint lần cuối trước khi gửi
-    const preCheckpoint = await detectCheckpoint(page);
-    if (preCheckpoint.detected) {
-      return { success: false, error: preCheckpoint.message, checkpointDetected: true };
-    }
-
-    // Gửi tin nhắn bằng Enter
-    await page.keyboard.press("Enter");
-    await new Promise((r) => setTimeout(r, 1000 + Math.random() * 1000));
-
-    // Kiểm tra checkpoint sau khi gửi
-    const postCheckpoint = await detectCheckpoint(page);
-    if (postCheckpoint.detected) {
-      return { success: false, error: postCheckpoint.message, checkpointDetected: true };
-    }
-
-    return { success: true, checkpointDetected: false };
-  } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : String(error);
-    return { success: false, error: msg };
-  } finally {
-    if (page) {
-      try { await page.close(); } catch {}
-    }
-  }
-}
-
-// ─── Tự động lấy cookies từ URL Facebook ──────────────────────────────────────
-// Người dùng nhập URL Facebook (profile, messenger, v.v.)
-// Hệ thống mở headless browser, điều hướng đến URL đó,
-// chờ trang load và trích xuất toàn bộ cookies phiên đăng nhập.
-// Yêu cầu: người dùng đã đăng nhập Facebook trên trình duyệt đó trước đó
-// (hoặc cung cấp cookies thủ công lần đầu để bootstrap).
-//
-// Cách hoạt động thực tế:
-// - Nếu server chạy trên máy người dùng: mở browser với profile thật → lấy cookies
-// - Nếu server chạy trên cloud: mở headless browser → người dùng cần login thủ công lần đầu
-//   sau đó cookies được lưu và tái sử dụng
-
-export interface ExtractCookiesResult {
-  success: boolean;
-  cookies?: string; // JSON string của mảng cookies
-  cookieCount?: number;
-  error?: string;
-  requiresLogin?: boolean; // true nếu Facebook yêu cầu đăng nhập
-  loginUrl?: string;       // URL để người dùng đăng nhập
-}
-
-// Biến lưu trữ browser đang chờ login (dùng cho flow login thủ công)
+// ─── Extract Cookies ──────────────────────────────────────────────────────────
 const pendingLoginBrowsers = new Map<number, { browser: Browser; page: Page; createdAt: number }>();
 
-// Dọn dẹp các browser pending quá 10 phút
 setInterval(() => {
   const now = Date.now();
   Array.from(pendingLoginBrowsers.entries()).forEach(([userId, entry]) => {
@@ -330,16 +499,11 @@ export async function extractFacebookCookies(
 ): Promise<ExtractCookiesResult> {
   let browser: Browser | null = null;
   try {
-    // Chuẩn hóa URL
     let url = targetUrl.trim();
-    if (!url.startsWith("http")) {
-      url = "https://" + url;
-    }
-    // Nếu không phải facebook/messenger domain, mặc định về messenger
+    if (!url.startsWith("http")) url = "https://" + url;
     if (!url.includes("facebook.com") && !url.includes("messenger.com")) {
       url = "https://www.messenger.com";
     }
-
     browser = await puppeteer.launch({
       headless: true,
       args: [
@@ -351,42 +515,27 @@ export async function extractFacebookCookies(
         "--window-size=1280,800",
       ],
     });
-
     const page = await browser.newPage();
-
-    // Giả lập trình duyệt thật để tránh bị chặn
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     );
     await page.setViewport({ width: 1280, height: 800 });
-
-    // Ẩn dấu hiệu automation
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     });
-
-    // Điều hướng đến URL mục tiêu
     console.log(`[Puppeteer] Navigating to: ${url}`);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-
-    // Chờ thêm để trang load đầy đủ
     await new Promise((r) => setTimeout(r, 3000));
-
     const currentUrl = page.url();
     console.log(`[Puppeteer] Current URL after navigation: ${currentUrl}`);
-
-    // Kiểm tra xem có bị redirect về trang login không
     const isLoginPage =
       currentUrl.includes("/login") ||
       currentUrl.includes("login.php") ||
       currentUrl.includes("checkpoint") ||
       currentUrl.includes("accounts/login");
-
     if (isLoginPage) {
-      // Lưu browser để người dùng có thể login thủ công (nếu cần)
       pendingLoginBrowsers.set(userId, { browser, page, createdAt: Date.now() });
-      browser = null; // Không đóng browser này
-
+      browser = null;
       return {
         success: false,
         requiresLogin: true,
@@ -397,54 +546,29 @@ export async function extractFacebookCookies(
           "rồi dán vào ô bên dưới.",
       };
     }
-
-    // Lấy tất cả cookies từ domain facebook.com và messenger.com
     const allCookies = await page.cookies(
       "https://www.facebook.com",
       "https://www.messenger.com",
       "https://facebook.com",
       "https://messenger.com"
     );
-
-    // Lọc các cookies quan trọng cho phiên đăng nhập
-    const sessionCookieNames = [
-      "c_user", "xs", "fr", "datr", "sb", "wd", "locale",
-      "presence", "dpr", "m_pixel_ratio", "usida", "x-referer",
-      "act", "spin", "noscript", "flow", "oo", "pl",
-    ];
-
-    // Ưu tiên cookies quan trọng, nhưng giữ tất cả để đảm bảo session hoạt động
-    const importantCookies = allCookies.filter((c) =>
-      sessionCookieNames.includes(c.name) || c.domain?.includes("facebook.com") || c.domain?.includes("messenger.com")
+    const importantCookies = allCookies.filter(
+      (c) => c.domain?.includes("facebook.com") || c.domain?.includes("messenger.com")
     );
-
     if (importantCookies.length === 0) {
-      return {
-        success: false,
-        error: "Không tìm thấy cookies phiên đăng nhập. Trang có thể chưa load đầy đủ hoặc bạn chưa đăng nhập.",
-      };
+      return { success: false, error: "Không tìm thấy cookies phiên đăng nhập." };
     }
-
-    // Kiểm tra có cookie c_user (xác nhận đã đăng nhập) không
     const hasUserCookie = importantCookies.some((c) => c.name === "c_user");
     if (!hasUserCookie) {
       return {
         success: false,
         requiresLogin: true,
-        error:
-          "Không tìm thấy cookie xác thực người dùng (c_user). " +
-          "Vui lòng đăng nhập Facebook trên trình duyệt, xuất cookies và dán thủ công.",
+        error: "Không tìm thấy cookie xác thực người dùng (c_user). Vui lòng đăng nhập Facebook trên trình duyệt, xuất cookies và dán thủ công.",
       };
     }
-
     const cookiesJson = JSON.stringify(importantCookies, null, 2);
     console.log(`[Puppeteer] Extracted ${importantCookies.length} cookies successfully`);
-
-    return {
-      success: true,
-      cookies: cookiesJson,
-      cookieCount: importantCookies.length,
-    };
+    return { success: true, cookies: cookiesJson, cookieCount: importantCookies.length };
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error("[Puppeteer] extractFacebookCookies error:", msg);
@@ -456,18 +580,14 @@ export async function extractFacebookCookies(
   }
 }
 
-// Lấy cookies từ browser đang chờ login (sau khi người dùng đã login thủ công)
 export async function getCookiesFromPendingBrowser(userId: number): Promise<ExtractCookiesResult> {
   const entry = pendingLoginBrowsers.get(userId);
   if (!entry) {
     return { success: false, error: "Không có phiên browser nào đang chờ" };
   }
-
   try {
     const { browser, page } = entry;
     const currentUrl = page.url();
-
-    // Kiểm tra đã login chưa
     if (currentUrl.includes("/login") || currentUrl.includes("checkpoint")) {
       return {
         success: false,
@@ -475,21 +595,14 @@ export async function getCookiesFromPendingBrowser(userId: number): Promise<Extr
         error: "Chưa đăng nhập. Vui lòng hoàn tất đăng nhập trên trình duyệt.",
       };
     }
-
-    const allCookies = await page.cookies(
-      "https://www.facebook.com",
-      "https://www.messenger.com"
-    );
-
+    const allCookies = await page.cookies("https://www.facebook.com", "https://www.messenger.com");
     const hasUserCookie = allCookies.some((c) => c.name === "c_user");
     if (!hasUserCookie) {
       return { success: false, requiresLogin: true, error: "Chưa đăng nhập thành công" };
     }
-
     const cookiesJson = JSON.stringify(allCookies, null, 2);
     pendingLoginBrowsers.delete(userId);
     try { await browser.close(); } catch {}
-
     return { success: true, cookies: cookiesJson, cookieCount: allCookies.length };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

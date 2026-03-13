@@ -108,6 +108,20 @@
 - [ ] Kiểm tra toàn bộ luồng end-to-end
 - [ ] Tạo checkpoint và xuất bản website
 
+## Thiết kế lại: Auto Inbox Scan (mới)
+- [x] Puppeteer: scanMessengerInbox() - tự động quét inbox, lấy danh sách hội thoại từ trên xuống
+- [x] Puppeteer: openConversationAndSend() - click vào hội thoại, gửi tin nhắn
+- [x] DB Schema: thêm field `mode` (inbox_scan/manual) và `maxSendCount` vào campaigns
+- [x] Campaign Runner: runInboxScanCampaign() - chạy theo inbox scan mode
+- [x] Campaign Runner: runManualCampaign() - giữ lại mode thủ công
+- [x] routers.ts: thêm mode và maxSendCount vào campaigns.create và campaigns.update
+- [x] routers.ts: thêm botSession.startStream, stopStream, streamStatus procedures
+- [x] Frontend Campaigns: form tạo chiến dịch với chọn mode (Inbox Scan / Thủ công)
+- [x] Frontend Campaigns: hiển thị badge mode và giới hạn gửi trên card
+- [x] Frontend BotControl: hiển thị bot logs real-time (terminal-style)
+- [x] Frontend BotControl: cập nhật info panel hiển thị mode và maxSendCount
+- [x] Frontend BotControl: lắng nghe bot_log event từ WebSocket
+
 ## Lên lịch gửi tin nhắn tự động (mới)
 - [ ] Schema: bảng `schedules` (campaignId, userId, scheduledTime, repeatType, isActive, lastRunAt, nextRunAt)
 - [ ] Backend: scheduler service dùng setInterval kiểm tra mỗi phút, tự động start campaign đúng giờ

@@ -6,8 +6,15 @@ import {
   addMessageLog,
   createNotification,
   getBotSession,
+  bulkAddRecipients,
 } from "./db";
-import { sendMessengerMessage, interpolateMessage, closeBrowser } from "./puppeteer.service";
+import {
+  interpolateMessage,
+  closeBrowser,
+  openConversationAndSend,
+  scanMessengerInbox,
+  sendMessengerMessage,
+} from "./puppeteer.service";
 import { storagePut } from "./storage";
 import {
   SAFETY_PRESETS,
@@ -21,6 +28,12 @@ import {
   getRiskInfo,
   assessCampaignRisk,
 } from "./anti-checkpoint.service";
+import {
+  broadcastToUser,
+  setRunningCampaign,
+  updateCampaignProgress,
+  clearRunningCampaign,
+} from "./ws.service";
 
 // Trạng thái các chiến dịch đang chạy (in-memory)
 const runningCampaigns = new Map<number, {
@@ -97,9 +110,17 @@ export async function startCampaign(
   });
 
   // Chạy bất đồng bộ
-  runCampaignAsync(campaignId, userId, session.sessionData, campaign, config).catch(async (err) => {
+  const mode = (campaign as { mode?: string }).mode ?? "inbox_scan";
+  const maxSendCount = (campaign as { maxSendCount?: number }).maxSendCount ?? 0;
+
+  const runner = mode === "inbox_scan"
+    ? runInboxScanCampaign(campaignId, userId, session.sessionData, campaign, config, maxSendCount)
+    : runManualCampaign(campaignId, userId, session.sessionData, campaign, config);
+
+  runner.catch(async (err) => {
     console.error(`[CampaignRunner] Campaign ${campaignId} crashed:`, err);
     runningCampaigns.delete(campaignId);
+    clearRunningCampaign(userId);
     await updateCampaign(campaignId, userId, { status: "failed" });
     await createNotification({
       userId,
@@ -111,7 +132,217 @@ export async function startCampaign(
   });
 }
 
-async function runCampaignAsync(
+// ─── Inbox Scan Mode: tự động quét inbox và gửi từng hội thoại ───────────────
+async function runInboxScanCampaign(
+  campaignId: number,
+  userId: number,
+  sessionData: string,
+  campaign: { name: string; messageTemplate: string; delayBetweenMessages: number; maxRetries: number },
+  config: AntiCheckpointConfig,
+  maxSendCount: number // 0 = không giới hạn
+) {
+  let sentCount = 0;
+  let failedCount = 0;
+  let checkpointDetected = false;
+  const logs: string[] = [
+    `[${new Date().toISOString()}] ═══ BẮT ĐẦU CHIẾN DỊCH (INBOX SCAN): ${campaign.name} ═══`,
+    `[${new Date().toISOString()}] Chế độ: TỰ ĐỘNG QUÉT INBOX`,
+    `[${new Date().toISOString()}] Giới hạn gửi: ${maxSendCount === 0 ? "Không giới hạn" : maxSendCount + " người"}`,
+    `[${new Date().toISOString()}] Chế độ bảo vệ: ${config.safetyLevel.toUpperCase()}`,
+    `[${new Date().toISOString()}] Delay: ${config.minDelay}ms - ${config.maxDelay}ms`,
+    `───────────────────────────────────────────────────────`,
+  ];
+
+  // Thông báo bắt đầu quét
+  broadcastToUser(userId, "bot_log", { message: "Đang quét danh sách hội thoại trong inbox..." });
+  broadcastToUser(userId, "bot_started", { campaignId });
+
+  // Bước 1: Quét inbox để lấy danh sách hội thoại
+  logs.push(`[${new Date().toISOString()}] 🔍 Đang quét inbox Messenger...`);
+  const scanResult = await scanMessengerInbox(userId, sessionData, maxSendCount);
+
+  if (scanResult.error) {
+    logs.push(`[${new Date().toISOString()}] ❌ Lỗi quét inbox: ${scanResult.error}`);
+    runningCampaigns.delete(campaignId);
+    clearRunningCampaign(userId);
+    await updateCampaign(campaignId, userId, { status: "failed" });
+    await createNotification({
+      userId,
+      campaignId,
+      title: "Lỗi quét inbox",
+      content: scanResult.error,
+      type: "error",
+    });
+    return;
+  }
+
+  const contacts = scanResult.contacts;
+  logs.push(`[${new Date().toISOString()}] ✅ Tìm thấy ${contacts.length} hội thoại trong inbox`);
+  broadcastToUser(userId, "bot_log", { message: `Tìm thấy ${contacts.length} hội thoại. Bắt đầu gửi tin nhắn...` });
+
+  // Cập nhật tổng số người nhận
+  await updateCampaign(campaignId, userId, { totalRecipients: contacts.length });
+  setRunningCampaign(userId, campaignId, contacts.length);
+
+  // Bước 2: Gửi tin nhắn cho từng hội thoại
+  for (let i = 0; i < contacts.length; i++) {
+    const contact = contacts[i];
+    const state = runningCampaigns.get(campaignId);
+    if (!state || state.stop) {
+      logs.push(`[${new Date().toISOString()}] ⏹ Chiến dịch bị dừng thủ công`);
+      break;
+    }
+
+    // Chờ nếu đang bị pause
+    if (state.paused) {
+      logs.push(`[${new Date().toISOString()}] ⏸ Đang tạm dừng: ${state.pauseReason}`);
+      let waitedSeconds = 0;
+      while (state.paused && waitedSeconds < 1800) {
+        await sleep(10000);
+        waitedSeconds += 10;
+        const currentState = runningCampaigns.get(campaignId);
+        if (!currentState || currentState.stop) break;
+      }
+      if (state.paused) {
+        state.stop = true;
+        logs.push(`[${new Date().toISOString()}] ⏹ Tự động dừng sau 30 phút tạm dừng`);
+        break;
+      }
+      logs.push(`[${new Date().toISOString()}] ▶ Tiếp tục chiến dịch`);
+    }
+
+    // Kiểm tra rate limit
+    const rateCheck = checkRateLimit(userId, config);
+    if (!rateCheck.allowed) {
+      logs.push(`[${new Date().toISOString()}] ⏸ Rate limit: ${rateCheck.reason}`);
+      await pauseCampaign(campaignId, rateCheck.reason ?? "Rate limit");
+      await createNotification({
+        userId,
+        campaignId,
+        title: "Bot tạm dừng - Giới hạn tốc độ",
+        content: rateCheck.reason ?? "Đã đạt giới hạn gửi tin nhắn",
+        type: "warning",
+      });
+      if (rateCheck.waitMs) {
+        await sleep(Math.min(rateCheck.waitMs, 3600000));
+      }
+      await resumeCampaign(campaignId);
+    }
+
+    // Tạo nội dung tin nhắn
+    const now = new Date();
+    const message = interpolateMessage(campaign.messageTemplate, {
+      name: contact.name,
+      firstName: contact.name.split(" ")[0] ?? contact.name,
+      date: now.toLocaleDateString("vi-VN"),
+      time: now.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" }),
+    });
+
+    broadcastToUser(userId, "bot_log", {
+      message: `[${i + 1}/${contacts.length}] Đang gửi đến: ${contact.name}`,
+    });
+    logs.push(`[${new Date().toISOString()}] 📤 [${i + 1}/${contacts.length}] Gửi đến: ${contact.name} (${contact.conversationUrl})`);
+
+    let success = false;
+    let lastError = "";
+    const maxRetries = campaign.maxRetries;
+
+    // Retry loop
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const result = await openConversationAndSend(
+        userId,
+        contact.conversationUrl,
+        message,
+        sessionData,
+        config
+      );
+
+      if (result.checkpointDetected) {
+        checkpointDetected = true;
+        recordCheckpoint(userId);
+        logs.push(`[${new Date().toISOString()}] 🚨 CHECKPOINT PHÁT HIỆN! Dừng chiến dịch`);
+        await pauseCampaign(campaignId, "Phát hiện checkpoint Facebook");
+        await createNotification({
+          userId,
+          campaignId,
+          title: "🚨 Phát hiện Checkpoint Facebook!",
+          content: `Bot đã dừng khẩn cấp sau ${sentCount} tin nhắn. Facebook yêu cầu xác minh bảo mật.`,
+          type: "error",
+        });
+        await addMessageLog({
+          campaignId,
+          recipientId: 0,
+          userId,
+          recipientName: contact.name,
+          messageContent: message,
+          status: "failed",
+          errorMessage: "Checkpoint Facebook detected",
+          attemptNumber: attempt,
+          sentAt: new Date(),
+        });
+        const currentState = runningCampaigns.get(campaignId);
+        if (currentState) currentState.stop = true;
+        break;
+      }
+
+      await addMessageLog({
+        campaignId,
+        recipientId: 0,
+        userId,
+        recipientName: contact.name,
+        messageContent: message,
+        status: result.success ? "success" : attempt < maxRetries ? "retry" : "failed",
+        errorMessage: result.error,
+        attemptNumber: attempt,
+        sentAt: new Date(),
+      });
+
+      if (result.success) {
+        success = true;
+        recordMessageSent(userId);
+        const riskInfo = getRiskInfo(userId, config);
+        logs.push(
+          `[${new Date().toISOString()}] ✓ Gửi thành công: ${contact.name} | ` +
+          `Đã gửi giờ này: ${riskInfo.sentThisHour}/${riskInfo.maxPerHour} | Risk: ${riskInfo.riskScore}%`
+        );
+        break;
+      } else {
+        lastError = result.error ?? "Lỗi không xác định";
+        logs.push(`[${new Date().toISOString()}] ✗ Thất bại: ${contact.name} (lần ${attempt}): ${lastError}`);
+        if (attempt < maxRetries) {
+          await sleep(2000 * attempt + Math.random() * 1000);
+        }
+      }
+    }
+
+    if (checkpointDetected) break;
+
+    if (success) {
+      sentCount++;
+    } else {
+      failedCount++;
+    }
+
+    // Cập nhật tiến độ
+    const total = sentCount + failedCount;
+    const successRate = total > 0 ? (sentCount / total) * 100 : 0;
+    await updateCampaign(campaignId, userId, { sentCount, failedCount, successRate });
+    updateCampaignProgress(userId, i + 1);
+
+    // Delay trước tin tiếp theo
+    const currentState = runningCampaigns.get(campaignId);
+    if (currentState && !currentState.stop && i < contacts.length - 1) {
+      const smartDelay = calculateDelay(config, i, userId);
+      logs.push(`[${new Date().toISOString()}] ⏱ Chờ ${(smartDelay / 1000).toFixed(1)}s...`);
+      await sleep(smartDelay);
+    }
+  }
+
+  await finalizeCampaign(campaignId, userId, campaign.name, sentCount, failedCount, checkpointDetected, logs);
+}
+
+// ─── Manual Mode: dùng danh sách recipients thủ công ─────────────────────────
+async function runManualCampaign(
   campaignId: number,
   userId: number,
   sessionData: string,
@@ -125,14 +356,15 @@ async function runCampaignAsync(
   let failedCount = 0;
   let checkpointDetected = false;
   const logs: string[] = [
-    `[${new Date().toISOString()}] ═══ BẮT ĐẦU CHIẾN DỊCH: ${campaign.name} ═══`,
+    `[${new Date().toISOString()}] ═══ BẮT ĐẦU CHIẾN DỊCH (MANUAL): ${campaign.name} ═══`,
+    `[${new Date().toISOString()}] Chế độ: DANH SÁCH THỦ CÔNG`,
+    `[${new Date().toISOString()}] Tổng người nhận: ${pendingRecipients.length}`,
     `[${new Date().toISOString()}] Chế độ bảo vệ: ${config.safetyLevel.toUpperCase()}`,
-    `[${new Date().toISOString()}] Giới hạn: ${config.maxMessagesPerHour} tin/giờ, ${config.maxMessagesPerDay} tin/ngày`,
-    `[${new Date().toISOString()}] Delay: ${config.minDelay}ms - ${config.maxDelay}ms`,
-    `[${new Date().toISOString()}] Nghỉ ngơi: mỗi ${config.breakAfterMessages} tin, ${config.breakDurationMin}-${config.breakDurationMax}s`,
-    `[${new Date().toISOString()}] Tổng người nhận cần gửi: ${pendingRecipients.length}`,
     `───────────────────────────────────────────────────────`,
   ];
+
+  broadcastToUser(userId, "bot_started", { campaignId });
+  setRunningCampaign(userId, campaignId, pendingRecipients.length);
 
   for (let i = 0; i < pendingRecipients.length; i++) {
     const recipient = pendingRecipients[i];
@@ -142,10 +374,8 @@ async function runCampaignAsync(
       break;
     }
 
-    // Chờ nếu đang bị pause (do checkpoint hoặc rate limit)
     if (state.paused) {
       logs.push(`[${new Date().toISOString()}] ⏸ Đang tạm dừng: ${state.pauseReason}`);
-      // Chờ tối đa 30 phút, kiểm tra mỗi 10 giây
       let waitedSeconds = 0;
       while (state.paused && waitedSeconds < 1800) {
         await sleep(10000);
@@ -154,37 +384,20 @@ async function runCampaignAsync(
         if (!currentState || currentState.stop) break;
       }
       if (state.paused) {
-        // Vẫn còn pause sau 30 phút → dừng hẳn
         state.stop = true;
-        logs.push(`[${new Date().toISOString()}] ⏹ Tự động dừng sau 30 phút tạm dừng`);
         break;
       }
-      logs.push(`[${new Date().toISOString()}] ▶ Tiếp tục chiến dịch`);
     }
 
-    // Kiểm tra rate limit trước mỗi tin
     const rateCheck = checkRateLimit(userId, config);
     if (!rateCheck.allowed) {
-      logs.push(`[${new Date().toISOString()}] ⏸ Rate limit: ${rateCheck.reason}`);
       await pauseCampaign(campaignId, rateCheck.reason ?? "Rate limit");
-      await createNotification({
-        userId,
-        campaignId,
-        title: "Bot tạm dừng - Giới hạn tốc độ",
-        content: rateCheck.reason ?? "Đã đạt giới hạn gửi tin nhắn",
-        type: "warning",
-      });
-      // Chờ đúng thời gian cần thiết
-      if (rateCheck.waitMs) {
-        await sleep(Math.min(rateCheck.waitMs, 3600000)); // tối đa 1 giờ
-      }
+      if (rateCheck.waitMs) await sleep(Math.min(rateCheck.waitMs, 3600000));
       await resumeCampaign(campaignId);
     }
 
-    // Đánh dấu đang gửi
     await updateRecipientStatus(recipient.id, "sending");
 
-    // Thay thế biến động trong tin nhắn
     const now = new Date();
     const message = interpolateMessage(campaign.messageTemplate, {
       name: recipient.name,
@@ -196,10 +409,8 @@ async function runCampaignAsync(
 
     let success = false;
     let lastError = "";
-    const maxRetries = campaign.maxRetries;
 
-    // Retry loop với anti-checkpoint
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    for (let attempt = 1; attempt <= campaign.maxRetries; attempt++) {
       const result = await sendMessengerMessage(userId, {
         recipientName: recipient.name,
         facebookUrl: recipient.facebookUrl ?? recipient.facebookUid ?? undefined,
@@ -209,21 +420,17 @@ async function runCampaignAsync(
         messageIndex: i,
       });
 
-      // Kiểm tra nếu kết quả là checkpoint
       if (result.checkpointDetected) {
         checkpointDetected = true;
         recordCheckpoint(userId);
-        logs.push(`[${new Date().toISOString()}] 🚨 CHECKPOINT PHÁT HIỆN! Dừng chiến dịch ngay lập tức`);
-
         await pauseCampaign(campaignId, "Phát hiện checkpoint Facebook");
         await createNotification({
           userId,
           campaignId,
           title: "🚨 Phát hiện Checkpoint Facebook!",
-          content: `Bot đã dừng khẩn cấp sau ${sentCount} tin nhắn. Facebook yêu cầu xác minh bảo mật. Vui lòng kiểm tra tài khoản và cập nhật session.`,
+          content: `Bot dừng sau ${sentCount} tin nhắn. Facebook yêu cầu xác minh.`,
           type: "error",
         });
-
         await addMessageLog({
           campaignId,
           recipientId: recipient.id,
@@ -231,12 +438,10 @@ async function runCampaignAsync(
           recipientName: recipient.name,
           messageContent: message,
           status: "failed",
-          errorMessage: "Checkpoint Facebook detected - campaign paused",
+          errorMessage: "Checkpoint detected",
           attemptNumber: attempt,
           sentAt: new Date(),
         });
-
-        // Dừng hẳn campaign
         const currentState = runningCampaigns.get(campaignId);
         if (currentState) currentState.stop = true;
         break;
@@ -248,7 +453,7 @@ async function runCampaignAsync(
         userId,
         recipientName: recipient.name,
         messageContent: message,
-        status: result.success ? "success" : attempt < maxRetries ? "retry" : "failed",
+        status: result.success ? "success" : attempt < campaign.maxRetries ? "retry" : "failed",
         errorMessage: result.error,
         attemptNumber: attempt,
         sentAt: new Date(),
@@ -257,24 +462,13 @@ async function runCampaignAsync(
       if (result.success) {
         success = true;
         recordMessageSent(userId);
-        const riskInfo = getRiskInfo(userId, config);
-        logs.push(
-          `[${new Date().toISOString()}] ✓ Gửi thành công: ${recipient.name} (lần ${attempt}) | ` +
-          `Đã gửi giờ này: ${riskInfo.sentThisHour}/${riskInfo.maxPerHour} | Risk: ${riskInfo.riskScore}%`
-        );
         break;
       } else {
         lastError = result.error ?? "Lỗi không xác định";
-        logs.push(`[${new Date().toISOString()}] ✗ Thất bại: ${recipient.name} (lần ${attempt}): ${lastError}`);
-        if (attempt < maxRetries) {
-          // Exponential backoff với jitter
-          const backoffMs = 2000 * attempt + Math.random() * 1000;
-          await sleep(backoffMs);
-        }
+        if (attempt < campaign.maxRetries) await sleep(2000 * attempt);
       }
     }
 
-    // Nếu phát hiện checkpoint, dừng vòng lặp
     if (checkpointDetected) break;
 
     if (success) {
@@ -284,28 +478,39 @@ async function runCampaignAsync(
       failedCount++;
       await updateRecipientStatus(recipient.id, "failed", {
         errorMessage: lastError,
-        retryCount: maxRetries,
+        retryCount: campaign.maxRetries,
       });
     }
 
-    // Cập nhật tiến độ campaign
     const total = sentCount + failedCount;
     const successRate = total > 0 ? (sentCount / total) * 100 : 0;
     await updateCampaign(campaignId, userId, { sentCount, failedCount, successRate });
+    updateCampaignProgress(userId, i + 1);
 
-    // Tính delay thông minh cho tin tiếp theo
     const currentState = runningCampaigns.get(campaignId);
     if (currentState && !currentState.stop && i < pendingRecipients.length - 1) {
       const smartDelay = calculateDelay(config, i, userId);
-      logs.push(`[${new Date().toISOString()}] ⏱ Chờ ${(smartDelay / 1000).toFixed(1)}s trước tin tiếp theo...`);
       await sleep(smartDelay);
     }
   }
 
-  // Kết thúc chiến dịch
+  await finalizeCampaign(campaignId, userId, campaign.name, sentCount, failedCount, checkpointDetected, logs);
+}
+
+// ─── Finalize: kết thúc campaign, lưu log, gửi thông báo ─────────────────────
+async function finalizeCampaign(
+  campaignId: number,
+  userId: number,
+  campaignName: string,
+  sentCount: number,
+  failedCount: number,
+  checkpointDetected: boolean,
+  logs: string[]
+) {
   const state = runningCampaigns.get(campaignId);
   const wasStopped = state?.stop ?? false;
   runningCampaigns.delete(campaignId);
+  clearRunningCampaign(userId);
   resetConsecutive(userId);
 
   logs.push(`───────────────────────────────────────────────────────`);
@@ -331,28 +536,36 @@ async function runCampaignAsync(
     console.warn("[CampaignRunner] Failed to upload log:", e);
   }
 
-  // Gửi thông báo tổng kết
+  // Thông báo tổng kết
   let notifType: "success" | "warning" | "error" | "info" = "info";
   let notifTitle = "";
   let notifContent = "";
 
   if (checkpointDetected) {
     notifType = "error";
-    notifTitle = `🚨 Checkpoint phát hiện: ${campaign.name}`;
-    notifContent = `Bot dừng khẩn cấp sau ${sentCount} tin. Facebook yêu cầu xác minh. Hãy kiểm tra tài khoản và cập nhật session.`;
+    notifTitle = `🚨 Checkpoint phát hiện: ${campaignName}`;
+    notifContent = `Bot dừng khẩn cấp sau ${sentCount} tin. Facebook yêu cầu xác minh. Hãy kiểm tra tài khoản.`;
   } else if (wasStopped) {
     notifType = "warning";
-    notifTitle = `⏹ Chiến dịch đã dừng: ${campaign.name}`;
+    notifTitle = `⏹ Chiến dịch đã dừng: ${campaignName}`;
     notifContent = `Đã gửi: ${sentCount}, Thất bại: ${failedCount}.`;
   } else {
     notifType = failedCount === 0 ? "success" : "info";
-    notifTitle = `✅ Chiến dịch hoàn thành: ${campaign.name}`;
+    notifTitle = `✅ Chiến dịch hoàn thành: ${campaignName}`;
     notifContent = `Đã gửi ${sentCount}/${sentCount + failedCount} tin. Tỷ lệ thành công: ${
       (sentCount + failedCount) > 0 ? Math.round((sentCount / (sentCount + failedCount)) * 100) : 0
     }%.`;
   }
 
   await createNotification({ userId, campaignId, title: notifTitle, content: notifContent, type: notifType });
+
+  broadcastToUser(userId, "bot_stopped", {
+    campaignId,
+    sentCount,
+    failedCount,
+    reason: checkpointDetected ? "checkpoint" : wasStopped ? "manual" : "completed",
+  });
+
   await closeBrowser();
 }
 

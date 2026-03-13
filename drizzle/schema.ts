@@ -35,6 +35,10 @@ export const campaigns = mysqlTable("campaigns", {
   status: mysqlEnum("status", ["draft", "running", "paused", "completed", "failed"])
     .default("draft")
     .notNull(),
+  // Chế độ gửi: inbox_scan = tự động quét inbox từ trên xuống, manual = nhập danh sách thủ công
+  mode: mysqlEnum("mode", ["inbox_scan", "manual"]).default("inbox_scan").notNull(),
+  // Giới hạn số người gửi (0 = không giới hạn)
+  maxSendCount: int("maxSendCount").default(0).notNull(),
   delayBetweenMessages: int("delayBetweenMessages").default(3000).notNull(), // ms
   maxRetries: int("maxRetries").default(3).notNull(),
   totalRecipients: int("totalRecipients").default(0).notNull(),

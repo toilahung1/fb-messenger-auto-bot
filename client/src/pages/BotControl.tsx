@@ -11,7 +11,7 @@ import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
 import {
   Monitor, Play, Square, CheckCircle2, XCircle,
-  Loader2, MessageSquare, Users, Zap, Eye, AlertCircle
+  Loader2, MessageSquare, Zap, Eye, AlertCircle, Inbox, Infinity as InfinityIcon, Terminal,
 } from "lucide-react";
 
 interface BotProgress {
@@ -25,6 +25,7 @@ export default function BotControl() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const socketRef = useRef<Socket | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const logsEndRef = useRef<HTMLDivElement>(null);
 
   const [isBotRunning, setIsBotRunning] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -33,14 +34,16 @@ export default function BotControl() {
   const [recentEvents, setRecentEvents] = useState<{ type: string; name: string; ts: number }[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   const [frameCount, setFrameCount] = useState(0);
+  const [botLogs, setBotLogs] = useState<string[]>([]);
 
   const { data: campaigns } = trpc.campaigns.list.useQuery();
   const { data: session } = trpc.botSession.get.useQuery();
 
   const startMutation = trpc.campaigns.start.useMutation({
     onSuccess: () => {
-      toast.success("Bot đã bắt đầu gửi tin nhắn");
+      toast.success("Bot đã bắt đầu! Đang quét inbox Messenger...");
       setIsBotRunning(true);
+      setBotLogs([]);
     },
     onError: (e: { message: string }) => toast.error(e.message),
   });
@@ -75,7 +78,15 @@ export default function BotControl() {
     });
 
     viewerSocket.on("bot_started", () => setIsBotRunning(true));
-    viewerSocket.on("bot_stopped", () => { setIsBotRunning(false); setProgress(null); });
+    viewerSocket.on("bot_stopped", (data?: { sentCount?: number; failedCount?: number; reason?: string }) => {
+      setIsBotRunning(false);
+      setProgress(null);
+      if (data?.reason === "completed") {
+        toast.success(`Hoàn thành! Đã gửi ${data.sentCount ?? 0} tin nhắn.`);
+      } else if (data?.reason === "checkpoint") {
+        toast.error("Bot dừng do phát hiện checkpoint Facebook!");
+      }
+    });
     viewerSocket.on("campaign_completed", () => {
       setIsBotRunning(false);
       setProgress(null);
@@ -87,6 +98,12 @@ export default function BotControl() {
     viewerSocket.on("message_sent", () => addEvent("success", "Gửi thành công"));
     viewerSocket.on("message_failed", (data: { error?: string }) => {
       addEvent("failed", `Thất bại: ${data.error?.substring(0, 40) ?? "Lỗi không xác định"}`);
+    });
+
+    // Bot logs từ inbox scan
+    viewerSocket.on("bot_log", (data: { message: string }) => {
+      const ts = new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      setBotLogs(prev => [...prev.slice(-199), `[${ts}] ${data.message}`]);
     });
 
     // Nhận screen frames từ Puppeteer server-side
@@ -101,6 +118,11 @@ export default function BotControl() {
 
     return () => { viewerSocket.disconnect(); };
   }, [user?.id]);
+
+  // Auto-scroll logs
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [botLogs]);
 
   const renderFrame = useCallback((base64: string, width: number, height: number) => {
     const canvas = canvasRef.current;
@@ -134,8 +156,12 @@ export default function BotControl() {
     stopMutation.mutate({ id: parseInt(selectedCampaignId) });
   };
 
-  const progressPercent = progress ? Math.round((progress.current / progress.total) * 100) : 0;
+  const progressPercent = progress
+    ? progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0
+    : 0;
   const selectedCampaign = campaigns?.find(c => c.id === parseInt(selectedCampaignId));
+  const campaignMode = (selectedCampaign as { mode?: string } | undefined)?.mode ?? "inbox_scan";
+  const maxSendCount = (selectedCampaign as { maxSendCount?: number } | undefined)?.maxSendCount ?? 0;
 
   return (
     <DashboardLayout>
@@ -158,7 +184,7 @@ export default function BotControl() {
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* ─── Màn hình stream (2/3) ─────────────────────── */}
-          <div className="lg:col-span-2">
+          <div className="lg:col-span-2 space-y-4">
             <Card className="border-border">
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm font-medium flex items-center gap-2">
@@ -192,6 +218,47 @@ export default function BotControl() {
                       </div>
                     </div>
                   )}
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Bot Activity Logs */}
+            <Card className="border-border">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium flex items-center gap-2">
+                  <Terminal className="w-4 h-4 text-green-400" />
+                  Log hoạt động bot
+                  {isBotRunning && (
+                    <span className="flex items-center gap-1 text-xs text-green-400 ml-auto">
+                      <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
+                      Đang chạy
+                    </span>
+                  )}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="bg-black/60 rounded-lg p-3 h-48 overflow-y-auto font-mono text-xs">
+                  {botLogs.length === 0 ? (
+                    <p className="text-muted-foreground/40 text-center mt-16">
+                      Log sẽ xuất hiện khi bot bắt đầu chạy...
+                    </p>
+                  ) : (
+                    botLogs.map((log, i) => (
+                      <div
+                        key={i}
+                        className={`leading-5 ${
+                          log.includes("✓") ? "text-green-400" :
+                          log.includes("✗") || log.includes("❌") ? "text-red-400" :
+                          log.includes("🚨") ? "text-red-500 font-bold" :
+                          log.includes("⏱") ? "text-yellow-400/70" :
+                          "text-green-300/70"
+                        }`}
+                      >
+                        {log}
+                      </div>
+                    ))
+                  )}
+                  <div ref={logsEndRef} />
                 </div>
               </CardContent>
             </Card>
@@ -244,16 +311,30 @@ export default function BotControl() {
                 </Select>
 
                 {selectedCampaign && (
-                  <div className="text-xs text-muted-foreground space-y-1 bg-muted/20 rounded p-2">
-                    <div className="flex justify-between">
-                      <span className="flex items-center gap-1"><Users className="h-3 w-3" /> Người nhận</span>
-                      <span className="font-medium">{selectedCampaign.totalRecipients ?? "—"}</span>
+                  <div className="text-xs text-muted-foreground space-y-1.5 bg-muted/20 rounded p-2.5">
+                    {/* Mode */}
+                    <div className="flex justify-between items-center">
+                      <span className="flex items-center gap-1"><Inbox className="h-3 w-3" /> Chế độ</span>
+                      <span className={`font-medium ${campaignMode !== "manual" ? "text-indigo-400" : ""}`}>
+                        {campaignMode === "manual" ? "Thủ công" : "Inbox Scan"}
+                      </span>
                     </div>
-                    <div className="flex justify-between">
+                    {/* Giới hạn gửi */}
+                    {campaignMode !== "manual" && (
+                      <div className="flex justify-between items-center">
+                        <span className="flex items-center gap-1"><InfinityIcon className="h-3 w-3" /> Giới hạn</span>
+                        <span className="font-medium">
+                          {maxSendCount === 0 ? "Không giới hạn" : `${maxSendCount} người`}
+                        </span>
+                      </div>
+                    )}
+                    {/* Đã gửi */}
+                    <div className="flex justify-between items-center">
                       <span className="flex items-center gap-1"><MessageSquare className="h-3 w-3" /> Đã gửi</span>
                       <span className="font-medium text-green-400">{selectedCampaign.sentCount ?? 0}</span>
                     </div>
-                    <div className="flex justify-between">
+                    {/* Delay */}
+                    <div className="flex justify-between items-center">
                       <span className="flex items-center gap-1"><Zap className="h-3 w-3" /> Delay</span>
                       <span className="font-medium">{(selectedCampaign.delayBetweenMessages / 1000).toFixed(1)}s</span>
                     </div>
@@ -298,10 +379,12 @@ export default function BotControl() {
                 </CardHeader>
                 <CardContent className="space-y-2">
                   <div className="flex justify-between text-xs text-muted-foreground">
-                    <span>{progress.current} / {progress.total} tin nhắn</span>
-                    <span className="font-medium text-foreground">{progressPercent}%</span>
+                    <span>{progress.current} / {progress.total > 0 ? progress.total : "?"} tin nhắn</span>
+                    {progress.total > 0 && (
+                      <span className="font-medium text-foreground">{progressPercent}%</span>
+                    )}
                   </div>
-                  <Progress value={progressPercent} className="h-2" />
+                  {progress.total > 0 && <Progress value={progressPercent} className="h-2" />}
                 </CardContent>
               </Card>
             )}
@@ -310,10 +393,10 @@ export default function BotControl() {
             {recentEvents.length > 0 && (
               <Card className="border-border">
                 <CardHeader className="pb-2">
-                  <CardTitle className="text-sm">Hoạt động gần đây</CardTitle>
+                  <CardTitle className="text-sm">Kết quả gần đây</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                  <div className="space-y-1 max-h-36 overflow-y-auto">
                     {recentEvents.map((ev, i) => (
                       <div key={i} className="flex items-center gap-2 text-xs">
                         {ev.type === "success"
@@ -333,14 +416,14 @@ export default function BotControl() {
               <Card className="border-border/50 bg-muted/5">
                 <CardContent className="pt-4">
                   <div className="flex items-start gap-2">
-                    <AlertCircle className="h-4 w-4 text-blue-400 shrink-0 mt-0.5" />
+                    <AlertCircle className="h-4 w-4 text-indigo-400 shrink-0 mt-0.5" />
                     <div className="text-xs text-muted-foreground space-y-1">
-                      <p className="font-medium text-foreground">Cách sử dụng</p>
+                      <p className="font-medium text-foreground">Cách sử dụng Inbox Scan</p>
                       <ol className="list-decimal list-inside space-y-0.5">
                         <li>Thêm session Facebook trong <strong>Cài đặt</strong></li>
-                        <li>Tạo chiến dịch và thêm người nhận</li>
+                        <li>Tạo chiến dịch với chế độ <strong>Inbox Scan</strong></li>
                         <li>Chọn chiến dịch và nhấn <strong>Bắt đầu Bot</strong></li>
-                        <li>Xem bot hoạt động trực tiếp qua màn hình bên trái</li>
+                        <li>Bot tự mở Messenger, scroll inbox và gửi từng người</li>
                       </ol>
                     </div>
                   </div>

@@ -25,7 +25,10 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
-import { Plus, Trash2, Eye, Users, MessageSquare, Play, Pause, MoreVertical } from "lucide-react";
+import {
+  Plus, Trash2, Eye, Users, MessageSquare, Play, Pause,
+  MoreVertical, Inbox, List, Infinity as InfinityIcon, Zap,
+} from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -47,6 +50,21 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+function ModeBadge({ mode }: { mode?: string }) {
+  if (mode === "manual") {
+    return (
+      <span className="flex items-center gap-1 text-xs text-muted-foreground">
+        <List className="h-3 w-3" /> Thủ công
+      </span>
+    );
+  }
+  return (
+    <span className="flex items-center gap-1 text-xs text-indigo-400">
+      <Inbox className="h-3 w-3" /> Inbox Scan
+    </span>
+  );
+}
+
 export default function Campaigns() {
   const [, navigate] = useLocation();
   const utils = trpc.useUtils();
@@ -56,6 +74,7 @@ export default function Campaigns() {
     onSuccess: () => {
       utils.campaigns.list.invalidate();
       setShowCreate(false);
+      resetForm();
       toast.success("Đã tạo chiến dịch");
     },
     onError: (e) => toast.error(e.message),
@@ -70,7 +89,7 @@ export default function Campaigns() {
   const startMutation = trpc.campaigns.start.useMutation({
     onSuccess: () => {
       utils.campaigns.list.invalidate();
-      toast.success("Chiến dịch đã bắt đầu");
+      toast.success("Chiến dịch đã bắt đầu! Bot đang quét inbox...");
     },
     onError: (e) => toast.error(e.message),
   });
@@ -83,13 +102,17 @@ export default function Campaigns() {
 
   const [showCreate, setShowCreate] = useState(false);
   const [deleteId, setDeleteId] = useState<number | null>(null);
-  const [form, setForm] = useState({
+  const defaultForm = {
     name: "",
     description: "",
+    mode: "inbox_scan" as "inbox_scan" | "manual",
+    maxSendCount: 0,
     messageTemplate: "Xin chào {{name}}, ...",
     delayBetweenMessages: 3000,
     maxRetries: 3,
-  });
+  };
+  const [form, setForm] = useState(defaultForm);
+  const resetForm = () => setForm(defaultForm);
 
   const handleCreate = () => {
     if (!form.name.trim() || !form.messageTemplate.trim()) {
@@ -105,11 +128,22 @@ export default function Campaigns() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold">Chiến dịch</h1>
-            <p className="text-muted-foreground mt-1">Quản lý các chiến dịch gửi tin nhắn</p>
+            <p className="text-muted-foreground mt-1">Quản lý các chiến dịch gửi tin nhắn tự động</p>
           </div>
           <Button onClick={() => setShowCreate(true)}>
             <Plus className="h-4 w-4 mr-2" /> Tạo chiến dịch
           </Button>
+        </div>
+
+        {/* Info banner */}
+        <div className="flex items-start gap-3 p-4 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-sm">
+          <Inbox className="h-5 w-5 text-indigo-400 mt-0.5 shrink-0" />
+          <div>
+            <p className="font-medium text-indigo-300">Chế độ Inbox Scan</p>
+            <p className="text-muted-foreground mt-0.5">
+              Bot tự động mở Messenger, scroll qua tất cả hội thoại trong inbox từ trên xuống dưới và gửi tin nhắn cho từng người — không cần nhập danh sách thủ công.
+            </p>
+          </div>
         </div>
 
         {isLoading ? (
@@ -135,104 +169,124 @@ export default function Campaigns() {
           </Card>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {campaigns?.map((c) => (
-              <Card key={c.id} className="border-border/50 hover:border-border transition-colors">
-                <CardContent className="p-5">
-                  <div className="flex items-start justify-between mb-3">
-                    <div className="min-w-0 flex-1">
-                      <h3 className="font-semibold truncate">{c.name}</h3>
-                      {c.description && (
-                        <p className="text-xs text-muted-foreground mt-0.5 truncate">{c.description}</p>
+            {campaigns?.map((c) => {
+              const cMode = (c as { mode?: string }).mode;
+              const maxSend = (c as { maxSendCount?: number }).maxSendCount ?? 0;
+              return (
+                <Card key={c.id} className="border-border/50 hover:border-border transition-colors">
+                  <CardContent className="p-5">
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <h3 className="font-semibold truncate">{c.name}</h3>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <ModeBadge mode={cMode} />
+                          {cMode !== "manual" && maxSend === 0 && (
+                            <span className="flex items-center gap-0.5 text-xs text-muted-foreground">
+                              <InfinityIcon className="h-3 w-3" /> Không giới hạn
+                            </span>
+                          )}
+                          {cMode !== "manual" && maxSend > 0 && (
+                            <span className="text-xs text-muted-foreground">
+                              Tối đa {maxSend} người
+                            </span>
+                          )}
+                        </div>
+                        {c.description && (
+                          <p className="text-xs text-muted-foreground mt-1 truncate">{c.description}</p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 ml-2">
+                        <StatusBadge status={c.status} />
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon" className="h-7 w-7">
+                              <MoreVertical className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => navigate(`/campaigns/${c.id}`)}>
+                              <Eye className="h-4 w-4 mr-2" /> Chi tiết
+                            </DropdownMenuItem>
+                            {cMode === "manual" && (
+                              <DropdownMenuItem onClick={() => navigate(`/campaigns/${c.id}/recipients`)}>
+                                <Users className="h-4 w-4 mr-2" /> Người nhận
+                              </DropdownMenuItem>
+                            )}
+                            <DropdownMenuItem
+                              className="text-destructive"
+                              onClick={() => setDeleteId(c.id)}
+                            >
+                              <Trash2 className="h-4 w-4 mr-2" /> Xóa
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    </div>
+
+                    {/* Progress */}
+                    <div className="space-y-2 mb-4">
+                      <div className="flex justify-between text-xs text-muted-foreground">
+                        <span>{c.sentCount} đã gửi {c.totalRecipients > 0 ? `/ ${c.totalRecipients}` : ""}</span>
+                        <span>{c.successRate != null ? Math.round(c.successRate) : 0}% thành công</span>
+                      </div>
+                      <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-primary rounded-full transition-all"
+                          style={{
+                            width: c.totalRecipients > 0
+                              ? `${Math.min((c.sentCount / c.totalRecipients) * 100, 100)}%`
+                              : c.sentCount > 0 ? "100%" : "0%",
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="flex-1 text-xs"
+                        onClick={() => navigate(`/campaigns/${c.id}`)}
+                      >
+                        <Eye className="h-3 w-3 mr-1" /> Chi tiết
+                      </Button>
+                      {c.status === "running" ? (
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          className="flex-1 text-xs"
+                          onClick={() => stopMutation.mutate({ id: c.id })}
+                          disabled={stopMutation.isPending}
+                        >
+                          <Pause className="h-3 w-3 mr-1" /> Dừng
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          className="flex-1 text-xs"
+                          onClick={() => {
+                            navigate("/bot-control");
+                            toast.info("Chọn chiến dịch và nhấn Bắt đầu trong Bot Control");
+                          }}
+                          disabled={false}
+                        >
+                          <Zap className="h-3 w-3 mr-1" /> Chạy bot
+                        </Button>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 ml-2">
-                      <StatusBadge status={c.status} />
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon" className="h-7 w-7">
-                            <MoreVertical className="h-4 w-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => navigate(`/campaigns/${c.id}`)}>
-                            <Eye className="h-4 w-4 mr-2" /> Chi tiết
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => navigate(`/campaigns/${c.id}/recipients`)}>
-                            <Users className="h-4 w-4 mr-2" /> Người nhận
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            className="text-destructive"
-                            onClick={() => setDeleteId(c.id)}
-                          >
-                            <Trash2 className="h-4 w-4 mr-2" /> Xóa
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-                  </div>
-
-                  {/* Progress */}
-                  <div className="space-y-2 mb-4">
-                    <div className="flex justify-between text-xs text-muted-foreground">
-                      <span>{c.sentCount} / {c.totalRecipients} đã gửi</span>
-                      <span>{c.successRate != null ? Math.round(c.successRate) : 0}% thành công</span>
-                    </div>
-                    <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-primary rounded-full transition-all"
-                        style={{
-                          width: c.totalRecipients > 0
-                            ? `${(c.sentCount / c.totalRecipients) * 100}%`
-                            : "0%",
-                        }}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="flex-1 text-xs"
-                      onClick={() => navigate(`/campaigns/${c.id}`)}
-                    >
-                      <Eye className="h-3 w-3 mr-1" /> Chi tiết
-                    </Button>
-                    {c.status === "running" ? (
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        className="flex-1 text-xs"
-                        onClick={() => stopMutation.mutate({ id: c.id })}
-                        disabled={stopMutation.isPending}
-                      >
-                        <Pause className="h-3 w-3 mr-1" /> Dừng
-                      </Button>
-                    ) : (
-                      <Button
-                        size="sm"
-                        className="flex-1 text-xs"
-                        onClick={() => startMutation.mutate({ id: c.id })}
-                        disabled={
-                          startMutation.isPending ||
-                          c.status === "completed" ||
-                          c.totalRecipients === 0
-                        }
-                      >
-                        <Play className="h-3 w-3 mr-1" /> Bắt đầu
-                      </Button>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+                  </CardContent>
+                </Card>
+              );
+            })}
           </div>
         )}
       </div>
 
       {/* Create Dialog */}
-      <Dialog open={showCreate} onOpenChange={setShowCreate}>
-        <DialogContent className="max-w-lg">
+      <Dialog open={showCreate} onOpenChange={(v) => { setShowCreate(v); if (!v) resetForm(); }}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Tạo chiến dịch mới</DialogTitle>
           </DialogHeader>
@@ -253,6 +307,72 @@ export default function Campaigns() {
                 onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
               />
             </div>
+
+            {/* Chế độ gửi */}
+            <div className="space-y-2">
+              <Label>Chế độ gửi *</Label>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setForm((f) => ({ ...f, mode: "inbox_scan" }))}
+                  className={`flex flex-col gap-2 p-3 rounded-lg border-2 transition-colors text-left ${
+                    form.mode === "inbox_scan"
+                      ? "border-indigo-500 bg-indigo-500/10"
+                      : "border-border hover:border-border/80"
+                  }`}
+                >
+                  <Inbox className={`h-5 w-5 ${form.mode === "inbox_scan" ? "text-indigo-400" : "text-muted-foreground"}`} />
+                  <div>
+                    <div className="font-medium text-sm">Inbox Scan</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">Bot tự quét inbox và gửi cho tất cả</div>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForm((f) => ({ ...f, mode: "manual" }))}
+                  className={`flex flex-col gap-2 p-3 rounded-lg border-2 transition-colors text-left ${
+                    form.mode === "manual"
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:border-border/80"
+                  }`}
+                >
+                  <List className={`h-5 w-5 ${form.mode === "manual" ? "text-primary" : "text-muted-foreground"}`} />
+                  <div>
+                    <div className="font-medium text-sm">Danh sách thủ công</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">Nhập URL hoặc import CSV</div>
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            {/* Giới hạn số người gửi (chỉ hiện khi inbox_scan) */}
+            {form.mode === "inbox_scan" && (
+              <div className="space-y-1.5">
+                <Label className="flex items-center gap-2">
+                  Giới hạn số người gửi
+                  <span className="text-xs text-muted-foreground font-normal">(0 = không giới hạn)</span>
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min={0}
+                    placeholder="0"
+                    value={form.maxSendCount}
+                    onChange={(e) => setForm((f) => ({ ...f, maxSendCount: Number(e.target.value) }))}
+                    className="flex-1"
+                  />
+                  {form.maxSendCount === 0 && (
+                    <span className="flex items-center gap-1 text-sm text-muted-foreground whitespace-nowrap">
+                      <InfinityIcon className="h-4 w-4" /> Không giới hạn
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Bot sẽ gửi cho tất cả hội thoại trong inbox từ trên xuống
+                </p>
+              </div>
+            )}
+
             <div className="space-y-1.5">
               <Label>Nội dung tin nhắn *</Label>
               <Textarea
@@ -298,7 +418,7 @@ export default function Campaigns() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowCreate(false)}>
+            <Button variant="outline" onClick={() => { setShowCreate(false); resetForm(); }}>
               Hủy
             </Button>
             <Button onClick={handleCreate} disabled={createMutation.isPending}>
@@ -314,7 +434,7 @@ export default function Campaigns() {
           <AlertDialogHeader>
             <AlertDialogTitle>Xóa chiến dịch?</AlertDialogTitle>
             <AlertDialogDescription>
-              Hành động này không thể hoàn tác. Toàn bộ dữ liệu người nhận và lịch sử gửi tin nhắn sẽ bị xóa.
+              Hành động này không thể hoàn tác. Toàn bộ dữ liệu và lịch sử gửi tin nhắn sẽ bị xóa.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
