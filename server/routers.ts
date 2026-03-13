@@ -26,7 +26,8 @@ import {
   getUnreadNotificationCount,
   getDashboardStats,
 } from "./db";
-import { startCampaign, stopCampaign, isCampaignRunning } from "./campaign.runner";
+import { startCampaign, stopCampaign, isCampaignRunning, assessCampaignRisk, SAFETY_PRESETS, getRiskInfo } from "./campaign.runner";
+import { SAFETY_PRESETS as _SP, type SafetyLevel } from "./anti-checkpoint.service";
 import { extractFacebookCookies } from "./puppeteer.service";
 import { storagePut } from "./storage";
 import { parse as csvParse } from "csv-parse/sync";
@@ -90,10 +91,13 @@ const campaignRouter = router({
     }),
 
   start: protectedProcedure
-    .input(z.object({ id: z.number() }))
+    .input(z.object({
+      id: z.number(),
+      safetyLevel: z.enum(["low", "medium", "high", "extreme"]).default("medium"),
+    }))
     .mutation(async ({ ctx, input }) => {
       try {
-        await startCampaign(input.id, ctx.user.id);
+        await startCampaign(input.id, ctx.user.id, input.safetyLevel as SafetyLevel);
         return { success: true };
       } catch (e: unknown) {
         throw new TRPCError({
@@ -102,6 +106,37 @@ const campaignRouter = router({
         });
       }
     }),
+
+  assess: protectedProcedure
+    .input(z.object({
+      id: z.number(),
+      safetyLevel: z.enum(["low", "medium", "high", "extreme"]).default("medium"),
+    }))
+    .query(async ({ ctx, input }) => {
+      const recipients = await import("./db").then(m => m.getRecipientsByCampaign(input.id));
+      const pending = recipients.filter(r => r.status === "pending" || r.status === "failed");
+      const config = SAFETY_PRESETS[input.safetyLevel as SafetyLevel];
+      return assessCampaignRisk(pending.length, config, ctx.user.id);
+    }),
+
+  riskInfo: protectedProcedure
+    .input(z.object({ safetyLevel: z.enum(["low", "medium", "high", "extreme"]).default("medium") }))
+    .query(({ ctx, input }) => {
+      const config = SAFETY_PRESETS[input.safetyLevel as SafetyLevel];
+      return getRiskInfo(ctx.user.id, config);
+    }),
+
+  safetyPresets: publicProcedure.query(() => {
+    return Object.entries(SAFETY_PRESETS).map(([level, cfg]) => ({
+      level,
+      label: level === "low" ? "Thấp (Nhanh)" : level === "medium" ? "Trung bình" : level === "high" ? "Cao (An toàn)" : "Cực cao (Tối đa)",
+      description: level === "low" ? "2-5s delay, 60 tin/giờ - Nhanh nhưng rủi ro cao"
+        : level === "medium" ? "5-12s delay, 30 tin/giờ - Cân bằng tốc độ và an toàn"
+        : level === "high" ? "10-25s delay, 15 tin/giờ - An toàn, giả lập người dùng thật"
+        : "20-60s delay, 8 tin/giờ - Bảo vệ tối đa, rủi ro checkpoint thấp nhất",
+      ...cfg,
+    }));
+  }),
 
   stop: protectedProcedure
     .input(z.object({ id: z.number() }))

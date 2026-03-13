@@ -70,3 +70,15 @@
 - [x] Frontend: Form nhập URL Facebook trong trang Cài đặt
 - [x] Frontend: Nút "Ự động lấy cookies" với loading state và preview kết quả
 - [x] Frontend: Hiển thị trạng thái tiến trình (đang mở trang, đang lấy cookies, hoàn thành)
+
+## Chống Checkpoint Facebook (mới)
+- [x] Anti-Checkpoint Engine: random delay, human-like typing, mouse movement simulation
+- [x] Smart Rate Limiter: giới hạn số tin/giờ, nghỉ ngơi tự động theo session
+- [x] Phát hiện checkpoint tự động: theo dõi URL, DOM alert, captcha detection
+- [x] Xử lý checkpoint: tự động dừng campaign, thông báo người dùng
+- [x] Warm-up mode: gửi từ từ tăng dần để tránh bị phát hiện tài khoản mới
+- [x] Fingerprint protection: random viewport, user-agent rotation, timezone spoof
+- [x] Session health monitor: kiểm tra định kỳ session còn sống không
+- [x] Cấu hình bảo vệ trong UI: chọn mức độ an toàn (Thấp/Trung bình/Cao/Cực cao)
+- [x] Hiển thị Risk Score và cảnh báo trước khi chạy campaign
+- [x] Lịch sử checkpoint: ghi lại khi nào bị checkpoint, bao nhiêu tin đã gửi

@@ -23,8 +23,16 @@ import {
   Edit2,
   Save,
   X,
+  ShieldCheck,
+  ChevronDown,
 } from "lucide-react";
 import { format } from "date-fns";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { label: string; cls: string }> = {
@@ -51,6 +59,19 @@ export default function CampaignDetail() {
 
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({ name: "", description: "", messageTemplate: "", delayBetweenMessages: 3000, maxRetries: 3 });
+  const [safetyLevel, setSafetyLevel] = useState<"low" | "medium" | "high" | "extreme">("medium");
+
+  const { data: riskAssessment } = trpc.campaigns.assess.useQuery(
+    { id: campaignId, safetyLevel },
+    { enabled: !!campaignId }
+  );
+
+  const SAFETY_LABELS: Record<string, { label: string; color: string }> = {
+    low: { label: "Thấp", color: "text-red-400" },
+    medium: { label: "Trung bình", color: "text-yellow-400" },
+    high: { label: "Cao", color: "text-green-400" },
+    extreme: { label: "Cực cao", color: "text-blue-400" },
+  };
 
   const updateMutation = trpc.campaigns.update.useMutation({
     onSuccess: () => {
@@ -157,13 +178,44 @@ export default function CampaignDetail() {
                 <Pause className="h-4 w-4 mr-1" /> Dừng
               </Button>
             ) : (
-              <Button
-                size="sm"
-                onClick={() => startMutation.mutate({ id: campaignId })}
-                disabled={startMutation.isPending || campaign.totalRecipients === 0}
-              >
-                <Play className="h-4 w-4 mr-1" /> Bắt đầu
-              </Button>
+              <div className="flex items-center gap-1">
+                {/* Safety Level Dropdown */}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className="gap-1 text-xs">
+                      <ShieldCheck className={`h-3.5 w-3.5 ${SAFETY_LABELS[safetyLevel]?.color}`} />
+                      <span className={SAFETY_LABELS[safetyLevel]?.color}>{SAFETY_LABELS[safetyLevel]?.label}</span>
+                      <ChevronDown className="h-3 w-3" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    {Object.entries(SAFETY_LABELS).map(([level, meta]) => (
+                      <DropdownMenuItem key={level} onClick={() => setSafetyLevel(level as typeof safetyLevel)}>
+                        <ShieldCheck className={`h-4 w-4 mr-2 ${meta.color}`} />
+                        <span className={meta.color}>{meta.label}</span>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <Button
+                  size="sm"
+                  onClick={() => startMutation.mutate({ id: campaignId, safetyLevel })}
+                  disabled={startMutation.isPending || campaign.totalRecipients === 0}
+                >
+                  <Play className="h-4 w-4 mr-1" /> Bắt đầu
+                </Button>
+              </div>
+            )}
+            {/* Risk Assessment Badge */}
+            {riskAssessment && !campaign.isRunning && (
+              <div className={`text-xs px-2 py-1 rounded-full border ${
+                riskAssessment.riskLevel === "safe" ? "bg-green-500/10 border-green-500/20 text-green-400" :
+                riskAssessment.riskLevel === "caution" ? "bg-yellow-500/10 border-yellow-500/20 text-yellow-400" :
+                riskAssessment.riskLevel === "warning" ? "bg-orange-500/10 border-orange-500/20 text-orange-400" :
+                "bg-red-500/10 border-red-500/20 text-red-400"
+              }`}>
+                Risk: {riskAssessment.riskScore}% • {riskAssessment.estimatedDuration}
+              </div>
             )}
           </div>
         </div>

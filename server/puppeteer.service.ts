@@ -5,11 +5,14 @@ interface SendMessageOptions {
   facebookUrl?: string;
   message: string;
   sessionData?: string; // JSON cookies
+  antiCheckpointConfig?: import('./anti-checkpoint.service').AntiCheckpointConfig;
+  messageIndex?: number;
 }
 
 interface SendResult {
   success: boolean;
   error?: string;
+  checkpointDetected?: boolean;
 }
 
 // Singleton browser instance per process
@@ -114,10 +117,25 @@ export async function sendMessengerMessage(
     const browser = await getBrowser(userId, options.sessionData);
     page = await browser.newPage();
 
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    );
-    await page.setViewport({ width: 1280, height: 800 });
+    // Fingerprint protection
+    const { config: ac, getRandomUserAgent, getRandomViewport, applyFingerprintProtection } = await import('./anti-checkpoint.service').then(m => ({
+      config: options.antiCheckpointConfig,
+      getRandomUserAgent: m.getRandomUserAgent,
+      getRandomViewport: m.getRandomViewport,
+      applyFingerprintProtection: m.applyFingerprintProtection,
+    }));
+
+    if (ac?.enableFingerprintProtection) {
+      await applyFingerprintProtection(page);
+      await page.setUserAgent(getRandomUserAgent());
+      const vp = getRandomViewport();
+      await page.setViewport(vp);
+    } else {
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      );
+      await page.setViewport({ width: 1280, height: 800 });
+    }
 
     // Khôi phục cookies
     if (options.sessionData) {
@@ -138,10 +156,24 @@ export async function sendMessengerMessage(
 
     await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 30000 });
 
-    // Kiểm tra đã đăng nhập chưa
+    // Kiểm tra checkpoint ngay sau khi load trang
+    const { detectCheckpoint, simulateMouseMovement, simulateRandomScrolling, simulateHumanTyping } = await import('./anti-checkpoint.service');
+    const checkpointResult = await detectCheckpoint(page);
+    if (checkpointResult.detected) {
+      return { success: false, error: checkpointResult.message, checkpointDetected: true };
+    }
+
     const currentUrl = page.url();
-    if (currentUrl.includes("login") || currentUrl.includes("checkpoint")) {
-      return { success: false, error: "Phiên đăng nhập Facebook đã hết hạn. Vui lòng cập nhật session." };
+    if (currentUrl.includes("login")) {
+      return { success: false, error: "Phiên đăng nhập Facebook đã hết hạn. Vui lòng cập nhật session.", checkpointDetected: false };
+    }
+
+    // Giả lập hành vi người dùng
+    if (options.antiCheckpointConfig?.enableMouseMovement) {
+      await simulateMouseMovement(page);
+    }
+    if (options.antiCheckpointConfig?.enableRandomScrolling) {
+      await simulateRandomScrolling(page);
     }
 
     // Nếu không có URL cụ thể, tìm kiếm người nhận
@@ -220,17 +252,33 @@ export async function sendMessengerMessage(
     }
 
     await msgBox.click();
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 300 + Math.random() * 400));
 
-    // Gõ tin nhắn từng ký tự để tránh bị phát hiện
-    await page.keyboard.type(options.message, { delay: 50 });
-    await new Promise((r) => setTimeout(r, 500));
+    // Gõ tin nhắn: human typing hoặc nhanh
+    if (options.antiCheckpointConfig?.enableHumanTyping) {
+      await simulateHumanTyping(page, options.message);
+    } else {
+      await page.keyboard.type(options.message, { delay: 50 });
+    }
+    await new Promise((r) => setTimeout(r, 300 + Math.random() * 500));
+
+    // Kiểm tra checkpoint lần cuối trước khi gửi
+    const preCheckpoint = await detectCheckpoint(page);
+    if (preCheckpoint.detected) {
+      return { success: false, error: preCheckpoint.message, checkpointDetected: true };
+    }
 
     // Gửi tin nhắn bằng Enter
     await page.keyboard.press("Enter");
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1000 + Math.random() * 1000));
 
-    return { success: true };
+    // Kiểm tra checkpoint sau khi gửi
+    const postCheckpoint = await detectCheckpoint(page);
+    if (postCheckpoint.detected) {
+      return { success: false, error: postCheckpoint.message, checkpointDetected: true };
+    }
+
+    return { success: true, checkpointDetected: false };
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     return { success: false, error: msg };

@@ -12,6 +12,7 @@ import Recipients from "./pages/Recipients";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
 import BotControl from "./pages/BotControl";
+import Protection from "./pages/Protection";
 
 function Router() {
   return (
@@ -23,6 +24,7 @@ function Router() {
       <Route path="/logs" component={Logs} />
       <Route path="/settings" component={Settings} />
       <Route path="/bot-control" component={BotControl} />
+      <Route path="/protection" component={Protection} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>
