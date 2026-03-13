@@ -25,7 +25,13 @@ import {
   markAllNotificationsRead,
   getUnreadNotificationCount,
   getDashboardStats,
+  createSchedule,
+  getSchedulesByUser,
+  getScheduleById,
+  updateSchedule,
+  deleteSchedule,
 } from "./db";
+import { computeNextRunAt } from "./scheduler.service";
 import { startCampaign, stopCampaign, isCampaignRunning, assessCampaignRisk, SAFETY_PRESETS, getRiskInfo } from "./campaign.runner";
 import { SAFETY_PRESETS as _SP, type SafetyLevel } from "./anti-checkpoint.service";
 import { extractFacebookCookies } from "./puppeteer.service";
@@ -351,14 +357,98 @@ const notificationsRouter = router({
     await markAllNotificationsRead(ctx.user.id);
     return { success: true };
   }),
+});// ─── Schedules Router ────────────────────────────────────────────────────────────────
+const schedulesRouter = router({
+  list: protectedProcedure.query(({ ctx }) => getSchedulesByUser(ctx.user.id)),
+
+  create: protectedProcedure
+    .input(z.object({
+      name: z.string().min(1),
+      campaignId: z.number(),
+      hour: z.number().min(0).max(23),
+      minute: z.number().min(0).max(59).default(0),
+      repeatType: z.enum(["once", "daily", "weekdays", "weekends"]),
+      runDate: z.string().optional(), // ISO date string cho repeatType = once
+      safetyLevel: z.enum(["low", "medium", "high", "extreme"]).default("medium"),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const scheduleData = {
+        userId: ctx.user.id,
+        campaignId: input.campaignId,
+        name: input.name,
+        hour: input.hour,
+        minute: input.minute,
+        repeatType: input.repeatType,
+        runDate: input.runDate ? new Date(input.runDate) : undefined,
+        safetyLevel: input.safetyLevel,
+        isActive: true,
+        runCount: 0,
+      };
+      // Tính nextRunAt ngay khi tạo
+      const nextRunAt = computeNextRunAt({
+        ...scheduleData,
+        id: 0,
+        lastRunAt: null,
+        nextRunAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        runDate: scheduleData.runDate ?? null,
+      });
+      const id = await createSchedule({ ...scheduleData, nextRunAt: nextRunAt ?? undefined });
+      return { success: true, id };
+    }),
+
+  update: protectedProcedure
+    .input(z.object({
+      id: z.number(),
+      name: z.string().min(1).optional(),
+      hour: z.number().min(0).max(23).optional(),
+      minute: z.number().min(0).max(59).optional(),
+      repeatType: z.enum(["once", "daily", "weekdays", "weekends"]).optional(),
+      runDate: z.string().optional(),
+      safetyLevel: z.enum(["low", "medium", "high", "extreme"]).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const { id, runDate, ...rest } = input;
+      const existing = await getScheduleById(id, ctx.user.id);
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Không tìm thấy lịch" });
+      const updateData = {
+        ...rest,
+        ...(runDate ? { runDate: new Date(runDate) } : {}),
+      };
+      // Tính lại nextRunAt
+      const merged = { ...existing, ...updateData };
+      const nextRunAt = computeNextRunAt(merged);
+      await updateSchedule(id, ctx.user.id, { ...updateData, nextRunAt: nextRunAt ?? undefined });
+      return { success: true };
+    }),
+
+  toggle: protectedProcedure
+    .input(z.object({ id: z.number(), isActive: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      const existing = await getScheduleById(input.id, ctx.user.id);
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Không tìm thấy lịch" });
+      let nextRunAt = existing.nextRunAt;
+      if (input.isActive && !nextRunAt) {
+        nextRunAt = computeNextRunAt(existing);
+      }
+      await updateSchedule(input.id, ctx.user.id, { isActive: input.isActive, nextRunAt: nextRunAt ?? undefined });
+      return { success: true };
+    }),
+
+  delete: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ ctx, input }) => {
+      await deleteSchedule(input.id, ctx.user.id);
+      return { success: true };
+    }),
 });
 
-// ─── Dashboard Router ─────────────────────────────────────────────────────────
+// ─── Dashboard Router ────────────────────────────────────────────────────────────────
 const dashboardRouter = router({
   stats: protectedProcedure.query(({ ctx }) => getDashboardStats(ctx.user.id)),
 });
-
-// ─── App Router ───────────────────────────────────────────────────────────────
+// --- App Router ---
 export const appRouter = router({
   system: systemRouter,
   auth: router({
@@ -374,6 +464,7 @@ export const appRouter = router({
   logs: logsRouter,
   botSession: botSessionRouter,
   notifications: notificationsRouter,
+  schedules: schedulesRouter,
   dashboard: dashboardRouter,
 });
 

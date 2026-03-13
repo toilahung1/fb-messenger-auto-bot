@@ -123,3 +123,33 @@ export const notifications = mysqlTable("notifications", {
 
 export type Notification = typeof notifications.$inferSelect;
 export type InsertNotification = typeof notifications.$inferInsert;
+
+// Lịch hẹn gửi tin nhắn tự động
+export const schedules = mysqlTable("schedules", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  campaignId: int("campaignId").notNull(),
+  name: varchar("name", { length: 255 }).notNull(),
+  // Giờ và phút chạy (0-23, 0-59)
+  hour: int("hour").notNull(),
+  minute: int("minute").default(0).notNull(),
+  // Loại lặp lại
+  repeatType: mysqlEnum("repeatType", ["once", "daily", "weekdays", "weekends"])
+    .default("once")
+    .notNull(),
+  // Ngày chạy một lần (chỉ dùng khi repeatType = once)
+  runDate: timestamp("runDate"),
+  // Mức độ bảo vệ chống checkpoint
+  safetyLevel: mysqlEnum("safetyLevel", ["low", "medium", "high", "extreme"])
+    .default("medium")
+    .notNull(),
+  isActive: boolean("isActive").default(true).notNull(),
+  lastRunAt: timestamp("lastRunAt"),
+  nextRunAt: timestamp("nextRunAt"),
+  runCount: int("runCount").default(0).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type Schedule = typeof schedules.$inferSelect;
+export type InsertSchedule = typeof schedules.$inferInsert;

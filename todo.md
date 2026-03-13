@@ -107,3 +107,12 @@
 - [ ] Cập nhật Settings: bỏ tab extension, chỉ giữ đăng nhập qua Puppeteer và dán thủ công
 - [ ] Kiểm tra toàn bộ luồng end-to-end
 - [ ] Tạo checkpoint và xuất bản website
+
+## Lên lịch gửi tin nhắn tự động (mới)
+- [ ] Schema: bảng `schedules` (campaignId, userId, scheduledTime, repeatType, isActive, lastRunAt, nextRunAt)
+- [ ] Backend: scheduler service dùng setInterval kiểm tra mỗi phút, tự động start campaign đúng giờ
+- [ ] tRPC: CRUD procedures cho schedules (create, list, update, delete, toggle)
+- [ ] Frontend: trang Lịch hẹn với form tạo lịch (chọn chiến dịch, giờ, lặp lại hàng ngày/một lần)
+- [ ] Frontend: danh sách lịch đã tạo với trạng thái (active/inactive), thời gian chạy tiếp theo
+- [ ] Frontend: thêm menu Lịch hẹn vào sidebar
+- [ ] Thông báo in-app khi lịch tự động kích hoạt chiến dịch

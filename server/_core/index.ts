@@ -8,6 +8,7 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { initWebSocketServer } from "../ws.service";
+import { startScheduler } from "../scheduler.service";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -46,6 +47,8 @@ async function startServer() {
   );
   // Khởi tạo Socket.IO WebSocket server
   initWebSocketServer(server);
+  // Khởi động scheduler tự động lên lịch
+  startScheduler();
 
   // development mode uses Vite, production mode uses static files
   if (process.env.NODE_ENV === "development") {

@@ -8,6 +8,7 @@ import {
   messageLogs,
   botSessions,
   notifications,
+  schedules,
   type Campaign,
   type InsertCampaign,
   type Recipient,
@@ -15,6 +16,8 @@ import {
   type InsertMessageLog,
   type InsertBotSession,
   type InsertNotification,
+  type InsertSchedule,
+  type Schedule,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
@@ -319,4 +322,44 @@ export async function getDashboardStats(userId: number) {
       totalFailed: Number(msgStats?.totalFailed ?? 0),
     },
   };
+}
+
+// ─── Schedules ────────────────────────────────────────────────────────────────
+
+export async function createSchedule(data: InsertSchedule): Promise<number> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const [result] = await db.insert(schedules).values(data);
+  return (result as { insertId: number }).insertId;
+}
+
+export async function getSchedulesByUser(userId: number): Promise<Schedule[]> {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(schedules).where(eq(schedules.userId, userId)).orderBy(desc(schedules.createdAt));
+}
+
+export async function getScheduleById(id: number, userId: number): Promise<Schedule | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(schedules).where(and(eq(schedules.id, id), eq(schedules.userId, userId))).limit(1);
+  return result[0];
+}
+
+export async function updateSchedule(id: number, userId: number, data: Partial<InsertSchedule>): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(schedules).set(data).where(and(eq(schedules.id, id), eq(schedules.userId, userId)));
+}
+
+export async function deleteSchedule(id: number, userId: number): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db.delete(schedules).where(and(eq(schedules.id, id), eq(schedules.userId, userId)));
+}
+
+export async function getAllActiveSchedules(): Promise<Schedule[]> {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(schedules).where(eq(schedules.isActive, true));
 }
