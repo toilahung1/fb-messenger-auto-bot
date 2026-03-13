@@ -97,3 +97,13 @@
 - [x] popup.js: tự động load lại thông tin từ storage khi popup mở
 - [x] popup.js: hiển thị trạng thái kết nối ngay khi mở (đã kết nối / chưa kết nối)
 - [x] Đóng gói lại extension .zip và upload CDN
+
+## Bỏ Extension - Tích hợp hết vào Website
+- [ ] Puppeteer Screen Stream Service: chụp screenshot liên tục (5fps), gửi qua Socket.IO
+- [ ] Trang "Đăng nhập Facebook": hiển thị live view Puppeteer, người dùng đăng nhập thật
+- [ ] Phát hiện đăng nhập thành công, tự động lưu cookies vào database
+- [ ] Cập nhật Bot Control: hiển thị stream màn hình Puppeteer real-time
+- [ ] Xóa toàn bộ code liên quan đến extension (ws.service extension token, BotControl extension UI)
+- [ ] Cập nhật Settings: bỏ tab extension, chỉ giữ đăng nhập qua Puppeteer và dán thủ công
+- [ ] Kiểm tra toàn bộ luồng end-to-end
+- [ ] Tạo checkpoint và xuất bản website

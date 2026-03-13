@@ -31,11 +31,7 @@ import { SAFETY_PRESETS as _SP, type SafetyLevel } from "./anti-checkpoint.servi
 import { extractFacebookCookies } from "./puppeteer.service";
 import { storagePut } from "./storage";
 import { parse as csvParse } from "csv-parse/sync";
-import { getExtensionStatus, sendCommandToExtension } from "./ws.service";
-import { nanoid } from "nanoid";
-import { getDb } from "./db";
-import { botSessions } from "../drizzle/schema";
-import { eq } from "drizzle-orm";
+import { broadcastToUser } from "./ws.service";
 
 // ─── Campaign Router ──────────────────────────────────────────────────────────
 const campaignRouter = router({
@@ -307,51 +303,6 @@ const botSessionRouter = router({
     return { success: true };
   }),
 
-  // Tạo hoặc lấy extension token để kết nối với Chrome Extension
-  getExtensionToken: protectedProcedure.mutation(async ({ ctx }) => {
-    const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-
-    let session = await getBotSession(ctx.user.id);
-    if (!session) {
-      await upsertBotSession({ userId: ctx.user.id, isActive: false });
-      session = await getBotSession(ctx.user.id);
-    }
-
-    if (!session?.extensionToken) {
-      const token = nanoid(32);
-      await db.update(botSessions)
-        .set({ extensionToken: token })
-        .where(eq(botSessions.userId, ctx.user.id));
-      return { token };
-    }
-    return { token: session.extensionToken };
-  }),
-
-  // Lấy trạng thái kết nối của extension
-  extensionStatus: protectedProcedure.query(async ({ ctx }) => {
-    const session = await getBotSession(ctx.user.id);
-    if (!session?.extensionToken) {
-      return { connected: false, streaming: false, botRunning: false, campaign: null };
-    }
-    return getExtensionStatus(session.extensionToken);
-  }),
-
-  // Gửi lệnh tới extension
-  sendCommand: protectedProcedure
-    .input(z.object({
-      action: z.enum(["start_stream", "stop_stream", "stop_bot"]),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      const session = await getBotSession(ctx.user.id);
-      if (!session?.extensionToken) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Chưa có extension token" });
-      }
-      const sent = sendCommandToExtension(session.extensionToken, input.action);
-      if (!sent) throw new TRPCError({ code: "BAD_REQUEST", message: "Extension chưa kết nối" });
-      return { success: true };
-    }),
-
   // Tự động lấy cookies từ URL Facebook
   extractCookies: protectedProcedure
     .input(z.object({ url: z.string().min(1) }))
@@ -379,88 +330,9 @@ const botSessionRouter = router({
       };
     }),
 
-  // Lấy cookies từ extension (không cần nhập URL, dùng cookies từ tab Facebook đang mở)
-  requestCookiesFromExtension: protectedProcedure
-    .mutation(async ({ ctx }) => {
-      const session = await getBotSession(ctx.user.id);
-      if (!session?.extensionToken) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "Chưa có extension token. Vui lòng cài và kết nối extension trước.",
-        });
-      }
-
-      const { requestCookiesFromExtension: reqCookies } = await import("./ws.service");
-      const result = await reqCookies(session.extensionToken);
-
-      if (!result.success) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: result.error || "Không thể lấy cookies từ extension",
-        });
-      }
-
-      // Tự động lưu cookies vào database
-      if (result.cookies && result.cookies.length > 0) {
-        await upsertBotSession({
-          userId: ctx.user.id,
-          sessionData: JSON.stringify(result.cookies),
-          isActive: true,
-          lastVerified: new Date(),
-        });
-      }
-
-      return {
-        success: true,
-        cookieCount: result.cookieCount || result.cookies?.length || 0,
-        message: `Đã lấy thành công ${result.cookieCount || result.cookies?.length || 0} cookies từ extension và lưu vào hệ thống`,
-      };
-    }),
-
-  // Bắt đầu chiến dịch qua extension
-  startBotCampaign: protectedProcedure
-    .input(z.object({ campaignId: z.number() }))
-    .mutation(async ({ ctx, input }) => {
-      const session = await getBotSession(ctx.user.id);
-      if (!session?.extensionToken) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Chưa kết nối extension" });
-      }
-
-      const campaign = await getCampaignById(input.campaignId, ctx.user.id);
-      if (!campaign) throw new TRPCError({ code: "NOT_FOUND", message: "Không tìm thấy chiến dịch" });
-
-      const allRecipients = await getRecipientsByCampaign(input.campaignId);
-      const pendingRecipients = allRecipients.filter(
-        (r) => r.status === "pending" || r.status === "failed"
-      );
-
-      if (pendingRecipients.length === 0) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Không có người nhận nào cần gửi" });
-      }
-
-      const sent = sendCommandToExtension(session.extensionToken, "start_bot", {
-        campaignId: campaign.id,
-        recipients: pendingRecipients.map((r) => ({
-          id: r.id,
-          name: r.name,
-          facebookUrl: r.facebookUrl,
-          facebookUid: r.facebookUid,
-        })),
-        messageTemplate: campaign.messageTemplate,
-        delay: campaign.delayBetweenMessages,
-        maxRetries: campaign.maxRetries,
-        total: pendingRecipients.length,
-      });
-
-      if (!sent) throw new TRPCError({ code: "BAD_REQUEST", message: "Extension chưa kết nối" });
-
-      await updateCampaign(input.campaignId, ctx.user.id, {
-        status: "running",
-        startedAt: new Date(),
-      });
-      return { success: true, total: pendingRecipients.length };
-    }),
 });
+
+// Placeholder - extensionStatus query removed (no more extension)
 
 // ─── Notifications Router ─────────────────────────────────────────────────────
 const notificationsRouter = router({
