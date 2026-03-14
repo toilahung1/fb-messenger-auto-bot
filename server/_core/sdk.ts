@@ -268,6 +268,24 @@ class SDKServer {
 
     const sessionUserId = session.openId;
     const signedInAt = new Date();
+
+    // Local admin session (Railway deployment without Manus OAuth)
+    // openId starts with 'local-admin-' → return synthetic user without DB
+    if (sessionUserId.startsWith('local-admin-')) {
+      const syntheticUser: User = {
+        id: 1,
+        openId: sessionUserId,
+        name: session.name || sessionUserId.replace('local-admin-', ''),
+        email: null,
+        loginMethod: 'local',
+        role: 'admin',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        lastSignedIn: signedInAt,
+      };
+      return syntheticUser;
+    }
+
     let user = await db.getUserByOpenId(sessionUserId);
 
     // If user not in DB, sync from OAuth server automatically

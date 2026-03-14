@@ -157,3 +157,16 @@ export const schedules = mysqlTable("schedules", {
 
 export type Schedule = typeof schedules.$inferSelect;
 export type InsertSchedule = typeof schedules.$inferInsert;
+
+// Tài khoản đăng nhập local (dùng cho Railway deployment, không cần Manus OAuth)
+export const localUsers = mysqlTable("local_users", {
+  id: int("id").autoincrement().primaryKey(),
+  username: varchar("username", { length: 64 }).notNull().unique(),
+  passwordHash: varchar("passwordHash", { length: 255 }).notNull(),
+  role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type LocalUser = typeof localUsers.$inferSelect;
+export type InsertLocalUser = typeof localUsers.$inferInsert;

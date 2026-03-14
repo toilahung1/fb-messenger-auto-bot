@@ -1,5 +1,6 @@
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
+import bcrypt from "bcryptjs";
 import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
@@ -41,6 +42,7 @@ import { extractFacebookCookies, startScreenStream, stopScreenStream, isStreamin
 import { storagePut } from "./storage";
 import { parse as csvParse } from "csv-parse/sync";
 import { broadcastToUser } from "./ws.service";
+import { createLocalUser, getLocalUserByUsername } from "./db";
 
 // ─── Campaign Router ──────────────────────────────────────────────────────────
 const campaignRouter = router({
@@ -503,34 +505,46 @@ export const appRouter = router({
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
     }),
-    // Local login for Railway deployment (no Manus OAuth)
+    // Local login for Railway deployment (uses local_users DB table)
     localLogin: publicProcedure
       .input(z.object({ username: z.string(), password: z.string() }))
       .mutation(async ({ input, ctx }) => {
         const { username, password } = input;
-        // Validate credentials from env
-        if (!ENV.adminPassword) {
-          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "ADMIN_PASSWORD chưa được cấu hình trên server" });
-        }
-        if (username !== ENV.adminUsername || password !== ENV.adminPassword) {
+        const user = await getLocalUserByUsername(username);
+        if (!user) {
           throw new TRPCError({ code: "UNAUTHORIZED", message: "Tên đăng nhập hoặc mật khẩu không đúng" });
         }
-        // Create/upsert admin user
-        const openId = `local-admin-${username}`;
-        await upsertUser({
+        const valid = await bcrypt.compare(password, user.passwordHash);
+        if (!valid) {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "Tên đăng nhập hoặc mật khẩu không đúng" });
+        }
+        // openId prefixed with 'local-' is handled specially in authenticateRequest (no DB lookup)
+        const openId = `local-${user.id}-${username}`;
+        const sessionToken = await sdk.signSession({
           openId,
+          appId: 'local',
           name: username,
-          email: null,
-          loginMethod: "local",
-          lastSignedIn: new Date(),
-        });
-        // Create session token
-        const sessionToken = await sdk.createSessionToken(openId, {
-          name: username,
-          expiresInMs: ONE_YEAR_MS,
-        });
+        }, { expiresInMs: ONE_YEAR_MS });
         const cookieOptions = getSessionCookieOptions(ctx.req);
         ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+        return { success: true } as const;
+      }),
+
+    // Local register for Railway deployment
+    localRegister: publicProcedure
+      .input(z.object({
+        username: z.string().min(3).max(64),
+        password: z.string().min(6),
+      }))
+      .mutation(async ({ input }) => {
+        const { username, password } = input;
+        // Check if username already exists
+        const existing = await getLocalUserByUsername(username);
+        if (existing) {
+          throw new TRPCError({ code: "CONFLICT", message: "Tên đăng nhập đã tồn tại" });
+        }
+        const passwordHash = await bcrypt.hash(password, 10);
+        await createLocalUser({ username, passwordHash, role: 'user' });
         return { success: true } as const;
       }),
   }),

@@ -18,6 +18,9 @@ import {
   type InsertNotification,
   type InsertSchedule,
   type Schedule,
+  localUsers,
+  type LocalUser,
+  type InsertLocalUser,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
@@ -362,4 +365,26 @@ export async function getAllActiveSchedules(): Promise<Schedule[]> {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(schedules).where(eq(schedules.isActive, true));
+}
+
+// ─── Local Users (Railway deployment - no Manus OAuth) ───────────────────────
+
+export async function createLocalUser(data: InsertLocalUser): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  await db.insert(localUsers).values(data);
+}
+
+export async function getLocalUserByUsername(username: string): Promise<LocalUser | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(localUsers).where(eq(localUsers.username, username)).limit(1);
+  return result[0];
+}
+
+export async function getLocalUserById(id: number): Promise<LocalUser | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(localUsers).where(eq(localUsers.id, id)).limit(1);
+  return result[0];
 }
