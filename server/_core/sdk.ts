@@ -269,13 +269,16 @@ class SDKServer {
     const sessionUserId = session.openId;
     const signedInAt = new Date();
 
-    // Local admin session (Railway deployment without Manus OAuth)
-    // openId starts with 'local-admin-' → return synthetic user without DB
-    if (sessionUserId.startsWith('local-admin-')) {
+    // Local session (Railway deployment without Manus OAuth)
+    // openId starts with 'local-' → return synthetic user without Manus DB lookup
+    if (sessionUserId.startsWith('local-')) {
+      // Extract numeric id from 'local-{id}-{username}'
+      const parts = sessionUserId.split('-');
+      const numericId = parseInt(parts[1] ?? '1', 10) || 1;
       const syntheticUser: User = {
-        id: 1,
+        id: numericId,
         openId: sessionUserId,
-        name: session.name || sessionUserId.replace('local-admin-', ''),
+        name: session.name || parts.slice(2).join('-') || 'user',
         email: null,
         loginMethod: 'local',
         role: 'admin',
