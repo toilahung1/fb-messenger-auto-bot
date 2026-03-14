@@ -286,8 +286,15 @@ export async function scanMessengerInbox(
       return { contacts: [], error: "Cookies hết hạn. Hãy cập nhật cookies trong Cài đặt." };
     }
 
-    // Chờ trang load xong
-    await sleep(2000);
+    // Chờ trang load xong - đợi lâu hơn để React render
+    await sleep(6000);
+
+    // Debug: log tất cả links tìm được lần đầu
+    const debugLinks = await activePage.evaluate(() => {
+      const allLinks = Array.from(document.querySelectorAll('a[href]')) as HTMLAnchorElement[];
+      return allLinks.slice(0, 30).map(l => ({ href: l.href, text: l.textContent?.substring(0, 40) }));
+    });
+    console.log('[Puppeteer] Debug links found:', JSON.stringify(debugLinks.slice(0, 10)));
 
     const contacts: InboxContact[] = [];
     let prevCount = 0;
@@ -304,58 +311,53 @@ export async function scanMessengerInbox(
       const found = await activePage.evaluate(() => {
         const results: { name: string; url: string }[] = [];
         const seen = new Set<string>();
+        const origin = window.location.origin; // https://www.messenger.com
 
-        // Strategy 1: Tìm link có href chứa /t/ hoặc /e2ee/t/
-        const allLinks = Array.from(document.querySelectorAll("a[href]")) as HTMLAnchorElement[];
+        // Strategy 1: Tìm tất cả <a> tags - kể cả href tương đối
+        const allLinks = Array.from(document.querySelectorAll('a[href]')) as HTMLAnchorElement[];
         for (const link of allLinks) {
-          const href = link.href || "";
-          if (!href.includes("messenger.com")) continue;
-          // Lọc chỉ lấy conversation links
-          if (
-            !href.match(/messenger\.com\/(t|e2ee\/t|groupconversations)\/[^/?#]+/) &&
-            !href.match(/messenger\.com\/\d+/)
-          ) continue;
+          const href = link.href || '';
+          // Chấp nhận cả URL đầy đủ và tương đối
+          const fullHref = href.startsWith('http') ? href : (origin + href);
+          
+          // Lọc chỉ lấy conversation links - nhiều pattern hơn
+          const isConvLink = 
+            fullHref.match(/messenger\.com\/t\/[^/?#]+/) ||
+            fullHref.match(/messenger\.com\/e2ee\/t\/[^/?#]+/) ||
+            fullHref.match(/messenger\.com\/groupconversations\/[^/?#]+/) ||
+            fullHref.match(/messenger\.com\/\d{5,}/) ||
+            href.match(/^\/t\/[^/?#]+/) ||
+            href.match(/^\/e2ee\/t\/[^/?#]+/) ||
+            href.match(/^\/\d{5,}/);
+          
+          if (!isConvLink) continue;
+          if (fullHref.includes('/settings') || fullHref.includes('/marketplace') || fullHref.includes('/help')) continue;
 
-          // Bỏ qua các link không phải hội thoại
-          if (href.includes("/settings") || href.includes("/marketplace") || href.includes("/help")) continue;
-
-          if (seen.has(href)) continue;
-          seen.add(href);
+          const normalizedUrl = fullHref.startsWith('http') ? fullHref : (origin + fullHref);
+          if (seen.has(normalizedUrl)) continue;
+          seen.add(normalizedUrl);
 
           // Lấy tên: thử nhiều cách
-          let name = "";
+          let name = link.getAttribute('aria-label') || '';
 
-          // Cách 1: aria-label của link
-          name = link.getAttribute("aria-label") || "";
-
-          // Cách 2: span[dir="auto"] bên trong link
           if (!name) {
             const spans = Array.from(link.querySelectorAll('span[dir="auto"]'));
             for (const span of spans) {
-              const t = (span as HTMLElement).textContent?.trim() ?? "";
-              if (t && t.length > 0 && t.length < 80 && !t.includes("·")) {
-                name = t;
-                break;
+              const t = (span as HTMLElement).textContent?.trim() ?? '';
+              if (t && t.length > 0 && t.length < 80 && !t.includes('·')) {
+                name = t; break;
               }
             }
           }
 
-          // Cách 3: text content đầu tiên của link
           if (!name) {
-            const t = link.textContent?.trim() ?? "";
-            if (t && t.length > 0 && t.length < 80) {
-              name = t.split("\n")[0].trim();
-            }
+            const t = link.textContent?.trim() ?? '';
+            if (t && t.length > 0 && t.length < 80) name = t.split('\n')[0].trim();
           }
 
-          // Cách 4: title attribute
-          if (!name) {
-            name = link.getAttribute("title") || "";
-          }
+          if (!name) name = link.getAttribute('title') || '';
 
-          if (name && name.length > 0) {
-            results.push({ name: name.substring(0, 60), url: href });
-          }
+          results.push({ name: (name || 'Người dùng').substring(0, 60), url: normalizedUrl });
         }
 
         return results;
