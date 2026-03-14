@@ -1,9 +1,12 @@
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import { COOKIE_NAME } from "@shared/const";
+import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { ENV } from "./_core/env";
+import { sdk } from "./_core/sdk";
+import { upsertUser } from "./db";
 import {
   createCampaign,
   getCampaignsByUserId,
@@ -500,6 +503,36 @@ export const appRouter = router({
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
     }),
+    // Local login for Railway deployment (no Manus OAuth)
+    localLogin: publicProcedure
+      .input(z.object({ username: z.string(), password: z.string() }))
+      .mutation(async ({ input, ctx }) => {
+        const { username, password } = input;
+        // Validate credentials from env
+        if (!ENV.adminPassword) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "ADMIN_PASSWORD chưa được cấu hình trên server" });
+        }
+        if (username !== ENV.adminUsername || password !== ENV.adminPassword) {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "Tên đăng nhập hoặc mật khẩu không đúng" });
+        }
+        // Create/upsert admin user
+        const openId = `local-admin-${username}`;
+        await upsertUser({
+          openId,
+          name: username,
+          email: null,
+          loginMethod: "local",
+          lastSignedIn: new Date(),
+        });
+        // Create session token
+        const sessionToken = await sdk.createSessionToken(openId, {
+          name: username,
+          expiresInMs: ONE_YEAR_MS,
+        });
+        const cookieOptions = getSessionCookieOptions(ctx.req);
+        ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+        return { success: true } as const;
+      }),
   }),
   campaigns: campaignRouter,
   recipients: recipientRouter,

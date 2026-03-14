@@ -14,6 +14,7 @@ import Settings from "./pages/Settings";
 import BotControl from "./pages/BotControl";
 import Protection from "./pages/Protection";
 import Scheduler from "./pages/Scheduler";
+import Login from "./pages/Login";
 
 function Router() {
   return (
@@ -27,6 +28,7 @@ function Router() {
       <Route path="/bot-control" component={BotControl} />
       <Route path="/protection" component={Protection} />
       <Route path="/scheduler" component={Scheduler} />
+      <Route path="/login" component={Login} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>
