@@ -28,6 +28,8 @@ import {
   Wand2,
   Cookie,
   Loader2,
+  Camera,
+  AlertTriangle,
 } from "lucide-react";
 import { format } from "date-fns";
 
@@ -82,6 +84,19 @@ export default function Settings() {
   const [showDeleteSession, setShowDeleteSession] = useState(false);
   const [facebookUrl, setFacebookUrl] = useState("https://messenger.com");
   const [activeTab, setActiveTab] = useState<"auto" | "manual">("auto");
+  const [debugResult, setDebugResult] = useState<{ screenshot?: string; url?: string; htmlSnippet?: string; error?: string } | null>(null);
+
+  const debugScreenshotMutation = trpc.botSession.debugScreenshot.useMutation({
+    onSuccess: (data) => {
+      setDebugResult(data);
+      if (data.ok) {
+        toast.success("Chụp screenshot thành công!");
+      } else {
+        toast.error(data.error ?? "Lỗi không xác định");
+      }
+    },
+    onError: (e) => toast.error(e.message),
+  });
 
   return (
     <DashboardLayout>
@@ -265,6 +280,71 @@ export default function Settings() {
             )}
           </CardContent>
         </Card>
+
+        {/* Debug Screenshot Card */}
+        {session?.isActive && (
+          <Card className="border-border/50">
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <Camera className="h-5 w-5 text-primary" />
+                <CardTitle className="text-base">Kiểm tra kết nối Messenger</CardTitle>
+              </div>
+              <CardDescription>
+                Chụp screenshot Messenger sau khi áp dụng cookies — giúp kiểm tra cookies có hoạt động không.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <Button
+                onClick={() => debugScreenshotMutation.mutate()}
+                disabled={debugScreenshotMutation.isPending}
+                variant="outline"
+                className="w-full"
+              >
+                {debugScreenshotMutation.isPending ? (
+                  <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Đang mở Messenger... (20–40 giây)</>
+                ) : (
+                  <><Camera className="h-4 w-4 mr-2" /> Chụp screenshot Messenger</>
+                )}
+              </Button>
+
+              {debugResult && (
+                <div className="space-y-3">
+                  {/* URL status */}
+                  <div className={`flex items-center gap-2 p-2 rounded-lg text-sm ${
+                    debugResult.url?.includes('login') || debugResult.url?.includes('checkpoint')
+                      ? 'bg-red-500/10 border border-red-500/20 text-red-400'
+                      : 'bg-green-500/10 border border-green-500/20 text-green-400'
+                  }`}>
+                    {debugResult.url?.includes('login') || debugResult.url?.includes('checkpoint') ? (
+                      <AlertTriangle className="h-4 w-4 shrink-0" />
+                    ) : (
+                      <CheckCircle className="h-4 w-4 shrink-0" />
+                    )}
+                    <span className="font-mono text-xs break-all">{debugResult.url ?? 'N/A'}</span>
+                  </div>
+
+                  {/* Screenshot */}
+                  {debugResult.screenshot && (
+                    <div className="rounded-lg overflow-hidden border border-border/50">
+                      <img
+                        src={`data:image/jpeg;base64,${debugResult.screenshot}`}
+                        alt="Messenger screenshot"
+                        className="w-full"
+                      />
+                    </div>
+                  )}
+
+                  {/* Error */}
+                  {debugResult.error && (
+                    <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+                      <p className="text-xs text-red-400">{debugResult.error}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         {/* Notifications */}
         <Card className="border-border/50">

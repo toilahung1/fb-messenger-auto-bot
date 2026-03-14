@@ -122,6 +122,13 @@
 - [x] Frontend BotControl: cập nhật info panel hiển thị mode và maxSendCount
 - [x] Frontend BotControl: lắng nghe bot_log event từ WebSocket
 
+## Debug & Fix gửi tin nhắn (bug fix)
+- [ ] Thêm function debugScreenshot vào puppeteer.service.ts
+- [ ] Thêm procedure botSession.debugScreenshot vào routers.ts
+- [ ] Cập nhật UI Settings: nút "Kiểm tra cookies" + hiển thị screenshot
+- [ ] Dựa vào screenshot thực tế, sửa selector inbox scan
+- [ ] Sửa selector gửi tin nhắn dựa vào DOM thực tế
+
 ## Lên lịch gửi tin nhắn tự động (mới)
 - [ ] Schema: bảng `schedules` (campaignId, userId, scheduledTime, repeatType, isActive, lastRunAt, nextRunAt)
 - [ ] Backend: scheduler service dùng setInterval kiểm tra mỗi phút, tự động start campaign đúng giờ

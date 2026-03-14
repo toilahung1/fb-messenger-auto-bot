@@ -34,7 +34,7 @@ import {
 import { computeNextRunAt } from "./scheduler.service";
 import { startCampaign, stopCampaign, isCampaignRunning, assessCampaignRisk, SAFETY_PRESETS, getRiskInfo } from "./campaign.runner";
 import { SAFETY_PRESETS as _SP, type SafetyLevel } from "./anti-checkpoint.service";
-import { extractFacebookCookies, startScreenStream, stopScreenStream, isStreaming } from "./puppeteer.service";
+import { extractFacebookCookies, startScreenStream, stopScreenStream, isStreaming, debugScreenshot } from "./puppeteer.service";
 import { storagePut } from "./storage";
 import { parse as csvParse } from "csv-parse/sync";
 import { broadcastToUser } from "./ws.service";
@@ -368,6 +368,16 @@ const botSessionRouter = router({
   // Trạng thái stream
   streamStatus: protectedProcedure.query(async () => {
     return { streaming: isStreaming() };
+  }),
+
+  // Debug: chụp screenshot Messenger sau khi apply cookies
+  debugScreenshot: protectedProcedure.mutation(async ({ ctx }) => {
+    const session = await getBotSession(ctx.user.id);
+    if (!session?.sessionData) {
+      throw new TRPCError({ code: "BAD_REQUEST", message: "Chưa có cookies. Hãy cấu hình session trước." });
+    }
+    const result = await debugScreenshot(ctx.user.id, session.sessionData);
+    return result;
   }),
 });
 // Placeholder - extensionStatus query removed (no more extension)

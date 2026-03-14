@@ -53,8 +53,9 @@ async function getBrowser(userId: number, sessionData?: string): Promise<Browser
       "--no-first-run",
       "--no-zygote",
       "--disable-gpu",
-      "--window-size=1280,800",
+      "--window-size=1280,900",
       "--disable-blink-features=AutomationControlled",
+      "--lang=vi-VN,vi",
     ],
   });
   browserInstance = browser;
@@ -89,20 +90,95 @@ export function interpolateMessage(template: string, data: Record<string, string
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
+// Type cho Puppeteer cookie param
+interface PuppeteerCookie {
+  name: string;
+  value: string;
+  domain?: string;
+  path?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+  sameSite?: 'Strict' | 'Lax' | 'None';
+  expires?: number;
+}
+
+// Chuyển đổi cookie từ format Cookie-Editor sang format Puppeteer
+function normalizeCookies(rawCookies: Record<string, unknown>[]): PuppeteerCookie[] {
+  const result: PuppeteerCookie[] = [];
+
+  for (const c of rawCookies) {
+    const name = String(c.name ?? '');
+    const value = String(c.value ?? '');
+    if (!name) continue;
+
+    // Lấy domain gốc
+    let domain = String(c.domain ?? '.facebook.com');
+    // Đảm bảo domain bắt đầu bằng dấu chấm cho cookie cross-subdomain
+    if (!domain.startsWith('.') && !domain.startsWith('http')) {
+      domain = '.' + domain;
+    }
+
+    // sameSite mapping
+    const ss = String(c.sameSite ?? '').toLowerCase();
+    let sameSite: 'Strict' | 'Lax' | 'None' = 'None';
+    if (ss === 'strict') sameSite = 'Strict';
+    else if (ss === 'lax') sameSite = 'Lax';
+
+    // Tạo cookie cho facebook.com
+    const base: PuppeteerCookie = {
+      name,
+      value,
+      domain,
+      path: String(c.path ?? '/'),
+      secure: Boolean(c.secure ?? false),
+      httpOnly: Boolean(c.httpOnly ?? false),
+      sameSite,
+    };
+
+    // Thêm expiry nếu có
+    if (c.expirationDate) {
+      base.expires = Number(c.expirationDate);
+    }
+
+    result.push(base);
+
+    // Nếu cookie là của facebook.com, tạo thêm bản sao cho messenger.com
+    if (domain.includes('facebook.com')) {
+      result.push({
+        ...base,
+        domain: domain.replace('facebook.com', 'messenger.com'),
+      });
+    }
+  }
+
+  return result;
+}
+
 async function applyCookiesToPage(page: Page, sessionData: string) {
   try {
-    const cookies = JSON.parse(sessionData);
-    await page.setCookie(...cookies);
-  } catch {}
+    const rawCookies = JSON.parse(sessionData) as Record<string, unknown>[];
+    if (!Array.isArray(rawCookies) || rawCookies.length === 0) return;
+
+    const normalized = normalizeCookies(rawCookies);
+    if (normalized.length > 0) {
+      await page.setCookie(...normalized);
+      console.log(`[Puppeteer] Applied ${normalized.length} cookies (${rawCookies.length} raw → ${normalized.length} normalized for fb+messenger)`);
+    }
+  } catch (e) {
+    console.warn('[Puppeteer] applyCookiesToPage error:', e);
+  }
 }
 
 async function setPageDefaults(page: Page) {
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
   );
-  await page.setViewport({ width: 1280, height: 800 });
+  await page.setViewport({ width: 1280, height: 900 });
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    // Fake plugins
+    Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+    Object.defineProperty(navigator, "languages", { get: () => ["vi-VN", "vi", "en-US", "en"] });
   });
 }
 
@@ -117,15 +193,19 @@ export async function startScreenStream(
     if (!streamPage || streamPage.isClosed()) {
       streamPage = await browser.newPage();
       await setPageDefaults(streamPage);
-      await applyCookiesToPage(streamPage, sessionData);
-      console.log("[Puppeteer] Opening Messenger inbox...");
+      console.log("[Puppeteer] Applying cookies and opening Messenger inbox...");
+      // Bước 1: Navigate đến messenger.com để thiết lập domain context
       await streamPage.goto("https://www.messenger.com/", {
         waitUntil: "domcontentloaded",
         timeout: 30000,
       });
-      await sleep(3000);
+      // Bước 2: Set cookies sau khi đã có domain context
+      await applyCookiesToPage(streamPage, sessionData);
+      // Bước 3: Reload để áp dụng cookies
+      await streamPage.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+      await sleep(4000);
       const url = streamPage.url();
-      console.log("[Puppeteer] Stream page URL:", url);
+      console.log("[Puppeteer] Stream page URL after cookie apply:", url);
       if (url.includes("login") || url.includes("checkpoint") || url.includes("recover")) {
         return {
           ok: false,
@@ -163,13 +243,11 @@ export function stopScreenStream() {
 export function isStreaming() { return streamInterval !== null; }
 
 // ─── Scan Inbox: lấy danh sách hội thoại từ Messenger inbox ──────────────────
-// Bot tự động scroll inbox từ trên xuống và lấy danh sách conversation
 export async function scanMessengerInbox(
   userId: number,
   sessionData: string,
-  maxContacts: number = 0 // 0 = không giới hạn
+  maxContacts: number = 0
 ): Promise<{ contacts: InboxContact[]; error?: string }> {
-  // Ưu tiên dùng streamPage để người dùng xem được quá trình
   const useStreamPage = streamPage && !streamPage.isClosed();
   let ownedPage: Page | null = null;
   let activePage: Page;
@@ -178,92 +256,112 @@ export async function scanMessengerInbox(
     const browser = await getBrowser(userId, sessionData);
     if (useStreamPage) {
       activePage = streamPage!;
-      // Đảm bảo đang ở trang inbox
       const currentUrl = activePage.url();
       if (!currentUrl.includes("messenger.com")) {
         await activePage.goto("https://www.messenger.com/", {
           waitUntil: "domcontentloaded",
           timeout: 30000,
         });
-        await sleep(3000);
+        await sleep(4000);
       }
     } else {
       ownedPage = await browser.newPage();
       await setPageDefaults(ownedPage);
-      await applyCookiesToPage(ownedPage, sessionData);
+      // Bước 1: Navigate đến messenger.com trước
       await ownedPage.goto("https://www.messenger.com/", {
-        waitUntil: "networkidle2",
+        waitUntil: "domcontentloaded",
         timeout: 30000,
       });
-      await sleep(3000);
+      // Bước 2: Set cookies sau khi có domain context
+      await applyCookiesToPage(ownedPage, sessionData);
+      // Bước 3: Reload để áp dụng cookies
+      await ownedPage.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+      await sleep(4000);
       activePage = ownedPage;
     }
 
     const url = activePage.url();
+    console.log("[Puppeteer] Current URL:", url);
     if (url.includes("login") || url.includes("checkpoint")) {
       return { contacts: [], error: "Cookies hết hạn. Hãy cập nhật cookies trong Cài đặt." };
     }
 
+    // Chờ trang load xong
+    await sleep(2000);
+
     const contacts: InboxContact[] = [];
     let prevCount = 0;
     let noNewCount = 0;
-    const maxScrollAttempts = 50; // tối đa 50 lần scroll
+    const maxScrollAttempts = 60;
     let scrollAttempts = 0;
 
-    console.log("[Puppeteer] Scanning inbox...");
+    console.log("[Puppeteer] Starting inbox scan...");
 
     while (scrollAttempts < maxScrollAttempts) {
       scrollAttempts++;
 
-      // Lấy danh sách conversation links hiện tại
+      // Lấy danh sách conversation links
       const found = await activePage.evaluate(() => {
         const results: { name: string; url: string }[] = [];
-        // Tìm tất cả link hội thoại - Messenger dùng /t/ hoặc /e2ee/t/
-        const linkNodes = document.querySelectorAll('a[href*="/t/"], a[href*="/e2ee/t/"]');
-        const links = Array.from(linkNodes);
-        links.forEach((link) => {
-          const href = (link as HTMLAnchorElement).href;
-          if (!href.includes("messenger.com")) return;
+        const seen = new Set<string>();
 
-          // Lấy tên người dùng từ nhiều nguồn
+        // Strategy 1: Tìm link có href chứa /t/ hoặc /e2ee/t/
+        const allLinks = Array.from(document.querySelectorAll("a[href]")) as HTMLAnchorElement[];
+        for (const link of allLinks) {
+          const href = link.href || "";
+          if (!href.includes("messenger.com")) continue;
+          // Lọc chỉ lấy conversation links
+          if (
+            !href.match(/messenger\.com\/(t|e2ee\/t|groupconversations)\/[^/?#]+/) &&
+            !href.match(/messenger\.com\/\d+/)
+          ) continue;
+
+          // Bỏ qua các link không phải hội thoại
+          if (href.includes("/settings") || href.includes("/marketplace") || href.includes("/help")) continue;
+
+          if (seen.has(href)) continue;
+          seen.add(href);
+
+          // Lấy tên: thử nhiều cách
           let name = "";
-          // Thử aria-label trên link
+
+          // Cách 1: aria-label của link
           name = link.getAttribute("aria-label") || "";
+
+          // Cách 2: span[dir="auto"] bên trong link
           if (!name) {
-            // Thử span có dir="auto" (tên người dùng)
-            const spanNodes = link.querySelectorAll('span[dir="auto"]');
-            const spans = Array.from(spanNodes);
+            const spans = Array.from(link.querySelectorAll('span[dir="auto"]'));
             for (const span of spans) {
-              const text = span.textContent?.trim();
-              if (text && text.length > 0 && text.length < 100) {
-                name = text;
+              const t = (span as HTMLElement).textContent?.trim() ?? "";
+              if (t && t.length > 0 && t.length < 80 && !t.includes("·")) {
+                name = t;
                 break;
               }
             }
           }
+
+          // Cách 3: text content đầu tiên của link
           if (!name) {
-            // Thử text content chung
-            const text = link.textContent?.trim();
-            if (text && text.length > 0 && text.length < 100) {
-              name = text.split("\n")[0].trim();
+            const t = link.textContent?.trim() ?? "";
+            if (t && t.length > 0 && t.length < 80) {
+              name = t.split("\n")[0].trim();
             }
           }
 
-          if (href && name) {
-            results.push({ name, url: href });
+          // Cách 4: title attribute
+          if (!name) {
+            name = link.getAttribute("title") || "";
           }
-        });
 
-        // Deduplicate by URL
-        const seen = new Set<string>();
-        return results.filter(r => {
-          if (seen.has(r.url)) return false;
-          seen.add(r.url);
-          return true;
-        });
+          if (name && name.length > 0) {
+            results.push({ name: name.substring(0, 60), url: href });
+          }
+        }
+
+        return results;
       });
 
-      // Thêm contacts mới chưa có trong danh sách
+      // Thêm contacts mới
       for (const item of found) {
         if (!contacts.find(c => c.conversationUrl === item.url)) {
           contacts.push({
@@ -273,43 +371,67 @@ export async function scanMessengerInbox(
         }
       }
 
-      console.log(`[Puppeteer] Inbox scan: ${contacts.length} contacts found (scroll ${scrollAttempts})`);
+      console.log(`[Puppeteer] Inbox scan: ${contacts.length} contacts (scroll ${scrollAttempts})`);
 
-      // Kiểm tra điều kiện dừng
       if (maxContacts > 0 && contacts.length >= maxContacts) break;
       if (contacts.length === prevCount) {
         noNewCount++;
-        if (noNewCount >= 3) break; // Không có thêm sau 3 lần scroll
+        if (noNewCount >= 4) break;
       } else {
         noNewCount = 0;
       }
       prevCount = contacts.length;
 
-      // Scroll xuống trong sidebar conversation list
+      // Scroll sidebar
       await activePage.evaluate(() => {
-        // Tìm container chứa danh sách hội thoại
-        const selectors = [
-          '[aria-label="Chats"]',
-          '[aria-label="Conversations"]',
-          '[aria-label="Tin nhắn"]',
-          'div[role="navigation"]',
-          'div[style*="overflow"]',
+        // Thử nhiều selector cho sidebar
+        const sidebarSelectors = [
+          '[role="navigation"]',
+          '[aria-label*="Chats"]',
+          '[aria-label*="Conversations"]',
+          '[aria-label*="Tin nhắn"]',
+          '[aria-label*="chat"]',
+          'div[style*="overflow-y: auto"]',
+          'div[style*="overflow-y:auto"]',
+          'div[style*="overflow: auto"]',
+          'div[style*="overflow:auto"]',
         ];
+
         let scrolled = false;
-        for (const sel of selectors) {
-          const el = document.querySelector(sel);
-          if (el && el.scrollHeight > el.clientHeight) {
-            el.scrollTop += 600;
-            scrolled = true;
-            break;
+        for (const sel of sidebarSelectors) {
+          const els = Array.from(document.querySelectorAll(sel));
+          for (const el of els) {
+            if (el.scrollHeight > el.clientHeight + 50) {
+              el.scrollTop += 800;
+              scrolled = true;
+              break;
+            }
+          }
+          if (scrolled) break;
+        }
+
+        if (!scrolled) {
+          // Fallback: tìm container có nhiều link nhất và scroll
+          const divs = Array.from(document.querySelectorAll("div"));
+          let bestDiv: Element | null = null;
+          let maxLinks = 0;
+          for (const div of divs) {
+            if (div.scrollHeight <= div.clientHeight + 50) continue;
+            const linkCount = div.querySelectorAll('a[href*="messenger.com"]').length;
+            if (linkCount > maxLinks) {
+              maxLinks = linkCount;
+              bestDiv = div;
+            }
+          }
+          if (bestDiv) {
+            bestDiv.scrollTop += 800;
+          } else {
+            window.scrollBy(0, 800);
           }
         }
-        if (!scrolled) {
-          // Fallback: scroll window
-          window.scrollBy(0, 600);
-        }
       });
-      await sleep(1200);
+
+      await sleep(1500);
     }
 
     const result = maxContacts > 0 ? contacts.slice(0, maxContacts) : contacts;
@@ -325,7 +447,6 @@ export async function scanMessengerInbox(
 }
 
 // ─── Open Conversation & Send Message ────────────────────────────────────────
-// Mở một hội thoại và gửi tin nhắn - dùng streamPage để hiển thị live
 export async function openConversationAndSend(
   userId: number,
   conversationUrl: string,
@@ -357,7 +478,9 @@ export async function openConversationAndSend(
       waitUntil: "domcontentloaded",
       timeout: 30000,
     });
-    await sleep(2000 + Math.random() * 1000);
+
+    // Chờ trang load
+    await sleep(3000 + Math.random() * 1000);
 
     // Kiểm tra checkpoint
     const checkResult = await detectCheckpoint(activePage);
@@ -375,50 +498,143 @@ export async function openConversationAndSend(
       await simulateMouseMovement(activePage);
     }
 
-    // Tìm ô nhập tin nhắn
+    // ─── Tìm ô nhập tin nhắn với nhiều strategy ───────────────────────────────
+    let msgBox = null;
+
+    // Strategy 1: Chờ và tìm div contenteditable
     const msgSelectors = [
       'div[contenteditable="true"][role="textbox"]',
-      'div[aria-label*="message"]',
-      'div[aria-label*="tin nhắn"]',
       'div[data-lexical-editor="true"]',
-      '[contenteditable="true"]',
+      'div[contenteditable="true"]',
+      '[role="textbox"]',
+      'div[aria-label*="message" i]',
+      'div[aria-label*="tin nhắn" i]',
+      'div[aria-label*="Aa"]',
+      'div[aria-placeholder*="Aa"]',
+      'div[aria-placeholder*="message" i]',
     ];
 
-    let msgBox = null;
     for (const sel of msgSelectors) {
       try {
-        await activePage.waitForSelector(sel, { timeout: 8000 });
-        msgBox = await activePage.$(sel);
-        if (msgBox) break;
-      } catch {}
+        await activePage.waitForSelector(sel, { timeout: 5000 });
+        const el = await activePage.$(sel);
+        if (el) {
+          // Kiểm tra element có visible không
+          const isVisible = await activePage.evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          }, el);
+          if (isVisible) {
+            msgBox = el;
+            console.log(`[Puppeteer] Found message box with selector: ${sel}`);
+            break;
+          }
+        }
+      } catch {
+        // tiếp tục thử selector tiếp theo
+      }
+    }
+
+    // Strategy 2: Nếu không tìm thấy, thử evaluate để tìm
+    if (!msgBox) {
+      console.log("[Puppeteer] Trying evaluate strategy to find message box...");
+      const found = await activePage.evaluate(() => {
+        // Tìm tất cả contenteditable elements
+        const editables = Array.from(document.querySelectorAll('[contenteditable="true"]'));
+        for (const el of editables) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 100 && rect.height > 20) {
+            // Đây có thể là ô nhập tin nhắn
+            (el as HTMLElement).click();
+            return true;
+          }
+        }
+        return false;
+      });
+
+      if (found) {
+        await sleep(500);
+        msgBox = await activePage.$('[contenteditable="true"]');
+      }
     }
 
     if (!msgBox) {
+      // Debug: lấy HTML để xem cấu trúc
+      const bodyHtml = await activePage.evaluate(() => {
+        return document.body.innerHTML.substring(0, 2000);
+      });
+      console.log("[Puppeteer] Page HTML snippet:", bodyHtml.substring(0, 500));
       return {
         success: false,
-        error: "Không tìm thấy ô nhập tin nhắn. Conversation có thể không hợp lệ.",
+        error: "Không tìm thấy ô nhập tin nhắn. Trang có thể chưa load xong.",
       };
     }
 
     // Click vào ô nhập
     await msgBox.click();
-    await sleep(300 + Math.random() * 200);
+    await sleep(500 + Math.random() * 300);
 
-    // Gõ tin nhắn
+    // Gõ tin nhắn - dùng clipboard để tránh vấn đề với ký tự đặc biệt
+    await activePage.evaluate((text) => {
+      // Tìm ô nhập và focus
+      const editables = Array.from(document.querySelectorAll('[contenteditable="true"]'));
+      for (const el of editables) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 100 && rect.height > 20) {
+          (el as HTMLElement).focus();
+          break;
+        }
+      }
+    }, message);
+
+    await sleep(200);
+
+    // Gõ từng ký tự
     if (antiCheckpointConfig?.enableHumanTyping) {
       await simulateHumanTyping(activePage, message);
     } else {
-      for (const char of message) {
-        await activePage.keyboard.type(char);
-        await sleep(30 + Math.random() * 70);
+      // Dùng clipboard API để paste text (nhanh hơn và đáng tin cậy hơn)
+      await activePage.evaluate((text) => {
+        const el = document.activeElement;
+        if (el && el.getAttribute("contenteditable") === "true") {
+          // Thử execCommand insertText
+          document.execCommand("insertText", false, text);
+        }
+      }, message);
+
+      // Kiểm tra nếu execCommand không hoạt động, gõ từng ký tự
+      const currentText = await activePage.evaluate(() => {
+        const el = document.activeElement;
+        return el ? el.textContent || "" : "";
+      });
+
+      if (!currentText.includes(message.substring(0, 5))) {
+        // Fallback: gõ từng ký tự
+        for (const char of message) {
+          await activePage.keyboard.type(char);
+          await sleep(20 + Math.random() * 40);
+        }
       }
     }
 
-    await sleep(500 + Math.random() * 300);
+    await sleep(600 + Math.random() * 400);
 
-    // Gửi
+    // Kiểm tra text đã được nhập chưa
+    const enteredText = await activePage.evaluate(() => {
+      const editables = Array.from(document.querySelectorAll('[contenteditable="true"]'));
+      for (const el of editables) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 100 && rect.height > 20) {
+          return el.textContent || "";
+        }
+      }
+      return "";
+    });
+    console.log(`[Puppeteer] Text in box: "${enteredText.substring(0, 50)}"`);
+
+    // Gửi tin nhắn bằng Enter
     await activePage.keyboard.press("Enter");
-    await sleep(1500 + Math.random() * 1000);
+    await sleep(2000 + Math.random() * 1000);
 
     // Kiểm tra checkpoint sau khi gửi
     const postCheck = await detectCheckpoint(activePage);
@@ -426,9 +642,41 @@ export async function openConversationAndSend(
       return { success: false, error: postCheck.message, checkpointDetected: true };
     }
 
+    // Xác nhận tin nhắn đã gửi (text box trống = đã gửi)
+    const textAfterSend = await activePage.evaluate(() => {
+      const editables = Array.from(document.querySelectorAll('[contenteditable="true"]'));
+      for (const el of editables) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 100 && rect.height > 20) {
+          return el.textContent || "";
+        }
+      }
+      return "";
+    });
+
+    if (textAfterSend.trim().length > 0 && textAfterSend.includes(message.substring(0, 10))) {
+      // Text vẫn còn trong box - thử gửi lại bằng click nút gửi
+      console.log("[Puppeteer] Text still in box, trying send button...");
+      const sendButtonSelectors = [
+        'div[aria-label*="Send" i]',
+        'div[aria-label*="Gửi" i]',
+        'button[aria-label*="Send" i]',
+        'button[aria-label*="Gửi" i]',
+      ];
+      for (const sel of sendButtonSelectors) {
+        const btn = await activePage.$(sel);
+        if (btn) {
+          await btn.click();
+          await sleep(1500);
+          break;
+        }
+      }
+    }
+
     return { success: true };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
+    console.error("[Puppeteer] openConversationAndSend error:", msg);
     return { success: false, error: msg };
   } finally {
     if (ownedPage) try { await ownedPage.close(); } catch {}
@@ -607,5 +855,100 @@ export async function getCookiesFromPendingBrowser(userId: number): Promise<Extr
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { success: false, error: msg };
+  }
+}
+
+// ─── Debug Screenshot: chụp màn hình Messenger sau khi apply cookies ─────────
+export async function debugScreenshot(
+  userId: number,
+  sessionData: string
+): Promise<{ ok: boolean; screenshot?: string; url?: string; htmlSnippet?: string; error?: string }> {
+  let browser: Browser | null = null;
+  try {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--window-size=1280,900",
+        "--disable-blink-features=AutomationControlled",
+      ],
+    });
+    const page = await browser.newPage();
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    );
+    await page.setViewport({ width: 1280, height: 900 });
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    });
+
+    // Bước 1: Navigate đến messenger.com
+    await page.goto("https://www.messenger.com/", {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+
+    // Bước 2: Apply cookies (normalize từ format Cookie-Editor)
+    try {
+      const rawCookies = JSON.parse(sessionData) as Record<string, unknown>[];
+      if (Array.isArray(rawCookies) && rawCookies.length > 0) {
+        const normalized = normalizeCookies(rawCookies);
+        await page.setCookie(...normalized);
+        console.log(`[Debug] Applied ${normalized.length} normalized cookies (from ${rawCookies.length} raw)`);
+      }
+    } catch (e) {
+      console.warn("[Debug] Cookie parse error:", e);
+    }
+
+    // Bước 3: Reload để áp dụng cookies
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+    await sleep(5000);
+
+    const url = page.url();
+    console.log("[Debug] URL after cookies:", url);
+
+    // Chụp screenshot
+    const screenshotBuffer = await page.screenshot({ type: "jpeg", quality: 80 });
+    const screenshot = Buffer.from(screenshotBuffer).toString("base64");
+
+    // Lấy thông tin DOM để debug
+    const domInfo = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll("a[href]"))
+        .slice(0, 20)
+        .map((l) => ({
+          href: (l as HTMLAnchorElement).href,
+          text: l.textContent?.substring(0, 30),
+          aria: l.getAttribute("aria-label"),
+        }));
+
+      const editables = Array.from(document.querySelectorAll('[contenteditable]')).map((el) => ({
+        tag: el.tagName,
+        role: el.getAttribute("role"),
+        aria: el.getAttribute("aria-label"),
+        placeholder: el.getAttribute("aria-placeholder"),
+        rect: JSON.stringify(el.getBoundingClientRect()),
+      }));
+
+      const title = document.title;
+      const bodyText = document.body?.textContent?.substring(0, 500) ?? "";
+
+      return { links, editables, title, bodyText };
+    });
+
+    return {
+      ok: true,
+      screenshot,
+      url,
+      htmlSnippet: JSON.stringify(domInfo, null, 2),
+    };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[Debug] debugScreenshot error:", msg);
+    return { ok: false, error: msg };
+  } finally {
+    if (browser) try { await browser.close(); } catch {}
   }
 }
